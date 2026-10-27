@@ -1,0 +1,4 @@
+# Paths written strictly by hand by IASoft engineers
+t0 = [
+  "crates/secret/src/",
+]
