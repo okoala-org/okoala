@@ -1,7 +1,7 @@
 // Copyright (C) 2026 IASoft PVT LTD
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Reading secret values from the file or environment variable a secret reference names.
+//! Secret references and reading the values they name.
 //!
 //! Buffers that held a secret and are discarded on an error path are dropped inside a `Secret`, so they are
 //! zeroized. Messages name the file or variable, never the value.
@@ -13,10 +13,18 @@ use std::path::Path;
 use okoala_secret::Secret;
 use toml::Value;
 
-use crate::env::Environment;
+use crate::env::{Environment, is_override_name};
 
 /// The largest secret accepted, in bytes.
 const MAX_SECRET_LEN: u64 = 64 * 1024;
+
+/// The key of a reference to a secret file: `{ secret_file = "<path>" }`.
+pub(crate) const FILE_KEY: &str = "secret_file";
+/// The key of a reference to a secret environment variable: `{ secret_env = "<VARIABLE>" }`.
+pub(crate) const ENV_KEY: &str = "secret_env";
+
+const REFERENCE_FORM: &str = "a secret is given as { secret_file = \"<path>\" } or \
+     { secret_env = \"<VARIABLE>\" }, never inline";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SecretKind {
@@ -30,15 +38,23 @@ pub(crate) enum Raw {
     Bytes(Vec<u8>),
 }
 
-enum Reference {
+/// Where a secret is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reference {
     File(String),
     Env(String),
 }
 
-const REFERENCE_FORM: &str =
-    "a secret is given as { file = \"<path>\" } or { env = \"<VARIABLE>\" }, never inline";
+impl Reference {
+    fn origin(&self) -> String {
+        match self {
+            Self::File(path) => format!("secret file {path}"),
+            Self::Env(name) => format!("environment variable {name}"),
+        }
+    }
+}
 
-fn discard_bytes(bytes: Vec<u8>) {
+pub(crate) fn discard_bytes(bytes: Vec<u8>) {
     drop(Secret::new(bytes));
 }
 
@@ -46,7 +62,27 @@ fn discard_text(text: String) {
     drop(Secret::new(text));
 }
 
-fn parse_reference(value: Value) -> Result<Reference, String> {
+/// The reference `value` is, if it has the exact shape of one (a table with the single key `secret_file` or
+/// `secret_env` and a string value).
+pub(crate) fn reference_of(value: &Value) -> Option<Reference> {
+    let Value::Table(table) = value else {
+        return None;
+    };
+    if table.len() != 1 {
+        return None;
+    }
+    match (table.get(FILE_KEY), table.get(ENV_KEY)) {
+        (Some(Value::String(path)), None) => Some(Reference::File(path.clone())),
+        (None, Some(Value::String(name))) => Some(Reference::Env(name.clone())),
+        _ => None,
+    }
+}
+
+/// The reference a secret field's value must be; anything else is an error that does not quote the value.
+pub(crate) fn parse_reference(value: Value) -> Result<Reference, String> {
+    if let Some(reference) = reference_of(&value) {
+        return Ok(reference);
+    }
     match value {
         Value::String(inline) => {
             discard_text(inline);
@@ -54,19 +90,50 @@ fn parse_reference(value: Value) -> Result<Reference, String> {
                 "inline secret values are not allowed; {REFERENCE_FORM}"
             ))
         }
-        Value::Table(table) => {
-            let mut entries = table.into_iter();
-            match (entries.next(), entries.next()) {
-                (Some((key, Value::String(target))), None) if key == "file" => {
-                    Ok(Reference::File(target))
-                }
-                (Some((key, Value::String(target))), None) if key == "env" => {
-                    Ok(Reference::Env(target))
-                }
-                _ => Err(REFERENCE_FORM.to_owned()),
-            }
-        }
         _ => Err(REFERENCE_FORM.to_owned()),
+    }
+}
+
+/// Turns the bytes of a fetched secret into the field's kind. Text secrets lose one trailing newline (`\n` or
+/// `\r\n`) and must then be one non-blank line; byte secrets are taken as they are.
+pub(crate) fn finish(
+    bytes: Vec<u8>,
+    kind: SecretKind,
+    reference: &Reference,
+) -> Result<Raw, String> {
+    let origin = reference.origin();
+    match kind {
+        SecretKind::Bytes => Ok(Raw::Bytes(bytes)),
+        SecretKind::Text => {
+            let mut text = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    discard_bytes(e.into_bytes());
+                    return Err(format!("{origin} is not valid UTF-8"));
+                }
+            };
+            if text.ends_with('\n') {
+                text.pop();
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+            }
+            let problem = if text.trim().is_empty() {
+                Some("is empty or only whitespace")
+            } else if text.contains(['\n', '\r']) {
+                Some(
+                    "contains a line break; a text secret is a single line (one trailing newline is \
+                     allowed)",
+                )
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                discard_text(text);
+                return Err(format!("{origin} {problem}"));
+            }
+            Ok(Raw::Text(text))
+        }
     }
 }
 
@@ -76,59 +143,40 @@ pub(crate) struct SecretSource<'a> {
 }
 
 impl SecretSource<'_> {
-    pub(crate) fn load(&self, value: Value, kind: SecretKind) -> Result<Raw, String> {
-        let (bytes, origin) = match parse_reference(value)? {
-            Reference::File(path) => {
-                let origin = format!("secret file {path}");
-                (self.read_file(Path::new(&path), &origin)?, origin)
-            }
+    /// Reads the bytes a reference names. Empty values are errors.
+    pub(crate) fn fetch(&self, reference: &Reference) -> Result<Vec<u8>, String> {
+        let origin = reference.origin();
+        let bytes = match reference {
+            Reference::File(path) => self.read_file(Path::new(path), &origin)?,
             Reference::Env(name) => {
-                let origin = format!("environment variable {name}");
-                match self.env.var(&name) {
-                    Some(value) => (value.into_bytes(), origin),
+                if is_override_name(name) {
+                    return Err(format!(
+                        "{origin} has the form of a configuration override (OKOALA_<SECTION>__<KEY>), so the \
+                         loader would apply it as one; name the secret's variable without `__`"
+                    ));
+                }
+                match self.env.var(name) {
+                    Some(value) => value.into_bytes(),
                     None => return Err(format!("{origin} is not set or not valid UTF-8")),
                 }
             }
         };
-        match kind {
-            SecretKind::Bytes => {
-                if bytes.is_empty() {
-                    return Err(format!("{origin} is empty"));
-                }
-                Ok(Raw::Bytes(bytes))
-            }
-            SecretKind::Text => {
-                let mut text = match String::from_utf8(bytes) {
-                    Ok(text) => text,
-                    Err(e) => {
-                        discard_bytes(e.into_bytes());
-                        return Err(format!("{origin} is not valid UTF-8"));
-                    }
-                };
-                if text.ends_with('\n') {
-                    text.pop();
-                    if text.ends_with('\r') {
-                        text.pop();
-                    }
-                }
-                if text.is_empty() {
-                    discard_text(text);
-                    return Err(format!("{origin} is empty"));
-                }
-                Ok(Raw::Text(text))
-            }
+        if bytes.is_empty() {
+            return Err(format!("{origin} is empty"));
         }
+        Ok(bytes)
     }
 
     fn read_file(&self, path: &Path, origin: &str) -> Result<Vec<u8>, String> {
-        let mut file = File::open(path).map_err(|e| format!("cannot open {origin}: {e}"))?;
+        let (mut file, under_kubernetes_dir) = self.open(path, origin)?;
+        // Checked again on the opened file, which is the object actually read.
         let meta = file
             .metadata()
             .map_err(|e| format!("cannot inspect {origin}: {e}"))?;
         if !meta.is_file() {
             return Err(format!("{origin} is not a regular file"));
         }
-        self.check_mode(path, &meta, origin)?;
+        check_mode(&meta, under_kubernetes_dir, self.kubernetes_dir, origin)?;
         if meta.len() > MAX_SECRET_LEN {
             return Err(format!("{origin} is larger than {MAX_SECRET_LEN} bytes"));
         }
@@ -159,51 +207,86 @@ impl SecretSource<'_> {
         Ok(buf)
     }
 
+    /// Opens a secret file, and says whether the opened file lies under the Kubernetes Secrets directory.
+    ///
+    /// The path is resolved once; only a regular file is opened (opening a FIFO would block), without
+    /// following a final symlink and non-blocking, so a file swapped in after the check cannot hang the
+    /// process. On Linux the location is then taken from the opened descriptor itself, so the location decision
+    /// and the file read are the same object.
     #[cfg(unix)]
-    fn check_mode(
-        &self,
-        path: &Path,
-        meta: &std::fs::Metadata,
-        origin: &str,
-    ) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
+    fn open(&self, path: &Path, origin: &str) -> Result<(File, bool), String> {
+        use rustix::fs::{Mode, OFlags};
 
-        let mode = meta.permissions().mode() & 0o7777;
-        let dir = self.kubernetes_dir.display();
-        match mode {
-            0o400 | 0o440 => Ok(()),
-            0o444 if self.under_kubernetes_dir(path) => Ok(()),
-            0o444 => Err(format!(
-                "{origin} has mode 0444; a world-readable secret file is accepted only under {dir} \
-                 (Kubernetes Secret mounts); use mode 0400 or 0440"
-            )),
-            other => Err(format!(
-                "{origin} has mode {other:04o}; a secret file must have mode 0400 or 0440 \
-                 (or 0444 under {dir})"
-            )),
+        let canonical =
+            std::fs::canonicalize(path).map_err(|e| format!("cannot open {origin}: {e}"))?;
+        let meta =
+            std::fs::metadata(&canonical).map_err(|e| format!("cannot inspect {origin}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{origin} is not a regular file"));
         }
+        let flags =
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let file = rustix::fs::open(&canonical, flags, Mode::empty())
+            .map(File::from)
+            .map_err(|e| format!("cannot open {origin}: {e}"))?;
+        let location = opened_path(&file).unwrap_or(canonical);
+        let under =
+            std::fs::canonicalize(self.kubernetes_dir).is_ok_and(|dir| location.starts_with(dir));
+        Ok((file, under))
     }
 
     #[cfg(not(unix))]
-    fn check_mode(
-        &self,
-        _path: &Path,
-        _meta: &std::fs::Metadata,
-        _origin: &str,
-    ) -> Result<(), String> {
-        Ok(())
+    fn open(&self, path: &Path, origin: &str) -> Result<(File, bool), String> {
+        let file = File::open(path).map_err(|e| format!("cannot open {origin}: {e}"))?;
+        Ok((file, false))
     }
+}
 
-    /// Whether the file, after resolving symlinks, lies under the Kubernetes Secrets directory (also
-    /// resolved). A symlink from that directory to a file elsewhere does not count.
-    #[cfg(unix)]
-    fn under_kubernetes_dir(&self, path: &Path) -> bool {
-        match (
-            std::fs::canonicalize(path),
-            std::fs::canonicalize(self.kubernetes_dir),
-        ) {
-            (Ok(file), Ok(dir)) => file.starts_with(dir),
-            _ => false,
-        }
+/// The path of an open file, from `/proc/self/fd`.
+#[cfg(target_os = "linux")]
+fn opened_path(file: &File) -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn opened_path(_file: &File) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Mode 0400 or 0440; 0444 only under the Kubernetes Secrets directory. Unix only: elsewhere there are no
+/// mode bits to check.
+#[cfg(unix)]
+fn check_mode(
+    meta: &std::fs::Metadata,
+    under_kubernetes_dir: bool,
+    kubernetes_dir: &Path,
+    origin: &str,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = meta.permissions().mode() & 0o7777;
+    let dir = kubernetes_dir.display();
+    match mode {
+        0o400 | 0o440 => Ok(()),
+        0o444 if under_kubernetes_dir => Ok(()),
+        0o444 => Err(format!(
+            "{origin} has mode 0444; a world-readable secret file is accepted only under {dir} \
+             (Kubernetes Secret mounts); use mode 0400 or 0440"
+        )),
+        other => Err(format!(
+            "{origin} has mode {other:04o}; a secret file must have mode 0400 or 0440 \
+             (or 0444 under {dir})"
+        )),
     }
+}
+
+#[cfg(not(unix))]
+fn check_mode(
+    _meta: &std::fs::Metadata,
+    _under_kubernetes_dir: bool,
+    _kubernetes_dir: &Path,
+    _origin: &str,
+) -> Result<(), String> {
+    Ok(())
 }

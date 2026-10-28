@@ -13,5 +13,8 @@ okoala-secret = { workspace = true }
 serde = { workspace = true }
 clap = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [lints]
 workspace = true

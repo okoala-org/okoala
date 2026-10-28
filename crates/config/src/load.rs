@@ -5,22 +5,20 @@
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
-use crate::de::{Ctx, ValueDe};
-use crate::env::Environment;
+use crate::de::{Ctx, Fetched, ValueDe};
+use crate::env::{Environment, OVERRIDE_PREFIX};
 use crate::error::{ConfigError, ConfigErrors};
 use crate::registry::{Parsed, Registry, Section, valid_name};
-use crate::source::SecretSource;
+use crate::source::{Reference, SecretSource, discard_bytes, reference_of};
 
 /// Where Kubernetes mounts Secrets; the only place a secret file may have mode 0444.
 pub const DEFAULT_KUBERNETES_SECRETS_DIR: &str = "/run/secrets";
-
-const OVERRIDE_PREFIX: &str = "OKOALA_";
 
 /// A loaded, validated configuration: one value per registered section.
 pub struct Config {
@@ -72,7 +70,7 @@ struct Origin {
 }
 
 impl<'r> Loader<'r> {
-    /// A loader for the sections of `registry`, reading overrides and `{ env = "..." }` secrets from `env`.
+    /// A loader for the sections of `registry`, reading overrides and `{ secret_env = "..." }` secrets from `env`.
     pub fn new(registry: &'r Registry, env: &'r dyn Environment) -> Self {
         Self {
             registry,
@@ -104,7 +102,18 @@ impl<'r> Loader<'r> {
     pub fn load_str(&self, text: &str) -> Result<Config, ConfigErrors> {
         let mut table = parse_toml(text).map_err(|e| ConfigErrors::new(vec![e]))?;
         let mut errors = Vec::new();
-        let origins = self.apply_overrides(&mut table, &mut errors);
+        // A variable the file names as a secret's `secret_env` is never applied as an override, even if it has
+        // an override's shape (the secret loader reports that as an error), so its value is not copied into the
+        // configuration.
+        let mut secret_vars = BTreeSet::new();
+        for (key, value) in &table {
+            visit_references(value, &mut vec![key.clone()], &mut |_, reference| {
+                if let Reference::Env(name) = reference {
+                    secret_vars.insert(name);
+                }
+            });
+        }
+        let origins = self.apply_overrides(&mut table, &secret_vars, &mut errors);
 
         let ctx = Ctx {
             secrets: SecretSource {
@@ -112,6 +121,7 @@ impl<'r> Loader<'r> {
                 kubernetes_dir: &self.kubernetes_secrets_dir,
             },
             secret_errors: RefCell::new(Vec::new()),
+            fetched: RefCell::new(Fetched::new()),
         };
         let mut sections: BTreeMap<&'static str, Parsed> = BTreeMap::new();
         for descriptor in self.registry.descriptors() {
@@ -119,9 +129,23 @@ impl<'r> Loader<'r> {
             let value = table
                 .remove(name)
                 .unwrap_or_else(|| Value::Table(Table::new()));
+            // Every secret reference in the section is fetched first, so that the ones deserialization never
+            // reaches (it stops at a section's first structural error) are still checked and reported.
+            let mut fetched = Fetched::new();
+            visit_references(&value, &mut Vec::new(), &mut |path, reference| {
+                let result = ctx.secrets.fetch(&reference);
+                fetched.insert(path.to_vec(), (reference, result));
+            });
+            ctx.fetched.replace(fetched);
             let parsed = descriptor.parse(ValueDe::new(value, &ctx));
             for e in ctx.secret_errors.take() {
                 errors.push(section_error(name, e.path, e.message, &origins));
+            }
+            for (path, (_, result)) in ctx.fetched.take() {
+                match result {
+                    Ok(bytes) => discard_bytes(bytes),
+                    Err(message) => errors.push(section_error(name, Some(path), message, &origins)),
+                }
             }
             match parsed {
                 Ok(parsed) => {
@@ -153,11 +177,19 @@ impl<'r> Loader<'r> {
         }
     }
 
-    fn apply_overrides(&self, table: &mut Table, errors: &mut Vec<ConfigError>) -> Vec<Origin> {
+    fn apply_overrides(
+        &self,
+        table: &mut Table,
+        secret_vars: &BTreeSet<String>,
+        errors: &mut Vec<ConfigError>,
+    ) -> Vec<Origin> {
         let mut names = self.env.names();
         names.sort();
         let mut origins = Vec::new();
         for variable in names {
+            if secret_vars.contains(&variable) {
+                continue;
+            }
             let Some(rest) = variable.strip_prefix(OVERRIDE_PREFIX) else {
                 continue;
             };
@@ -300,4 +332,34 @@ fn set_value(table: &mut Table, segments: &[String], value: Value) -> Result<(),
     }
     current.insert(last.clone(), value);
     Ok(())
+}
+
+/// Calls `f` with the key path and reference of every secret reference in `value`, with paths in the form the
+/// deserializer uses (`key`, `[index]`).
+fn visit_references(
+    value: &Value,
+    path: &mut Vec<String>,
+    f: &mut dyn FnMut(&[String], Reference),
+) {
+    if let Some(reference) = reference_of(value) {
+        f(path, reference);
+        return;
+    }
+    match value {
+        Value::Table(table) => {
+            for (key, inner) in table {
+                path.push(key.clone());
+                visit_references(inner, path, f);
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, inner) in items.iter().enumerate() {
+                path.push(format!("[{index}]"));
+                visit_references(inner, path, f);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
 }

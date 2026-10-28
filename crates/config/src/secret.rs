@@ -17,112 +17,192 @@
 //! }
 //! ```
 //!
-//! The field's value in the file is a reference, `{ file = "<path>" }` or `{ env = "<VARIABLE>" }`, and the
-//! loader reads the secret it names (see the crate documentation for the rules). These functions only work
-//! inside the [`crate::Loader`]: through another deserializer (`toml::from_str`, say) they fail, so a section
-//! type cannot be loaded in a way that skips the rules. Text secrets lose one trailing newline; byte secrets
-//! are taken as they are.
+//! The field's value in the file is a reference, `{ secret_file = "<path>" }` or
+//! `{ secret_env = "<VARIABLE>" }`, and the loader reads the secret it names (see the crate documentation for
+//! the rules). The loader hands the value over in a private form (a newtype variant with a reserved name) that
+//! these functions require, so a plain string from another deserializer is refused: `toml::from_str` and
+//! `serde`'s own value deserializers cannot load a secret field and skip the rules. Only a deserializer built
+//! to imitate that form could, which is a deliberate act, not a mistake.
+//!
+//! Text secrets lose one trailing newline and must then be one non-blank line; byte secrets are taken as they
+//! are.
 
 use std::fmt;
+use std::marker::PhantomData;
 
 use okoala_secret::Secret;
 use serde::Deserializer;
-use serde::de::{Unexpected, Visitor};
+use serde::de::{self, DeserializeSeed, EnumAccess, Unexpected, VariantAccess, Visitor};
 
 pub(crate) const TEXT_MARKER: &str = "$okoala_config::secret::text";
 pub(crate) const BYTES_MARKER: &str = "$okoala_config::secret::bytes";
+/// The variant name the loader hands secrets over with.
+pub(crate) const LOADED_VARIANT: &str = "$okoala_config::secret::loaded";
 
-#[derive(Clone, Copy)]
-struct TextVisitor;
+const EXPECTING: &str = "a secret reference loaded by okoala-config";
 
-impl<'de> Visitor<'de> for TextVisitor {
-    type Value = Secret<String>;
+/// The two secret types a field can have.
+trait SecretValue: Sized {
+    const MARKER: &'static str;
 
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a secret reference loaded by okoala-config")
-    }
+    fn from_string<E: de::Error>(value: String) -> Result<Self, E>;
 
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+    fn from_bytes<E: de::Error>(value: Vec<u8>) -> Result<Self, E>;
+}
+
+impl SecretValue for Secret<String> {
+    const MARKER: &'static str = TEXT_MARKER;
+
+    fn from_string<E: de::Error>(value: String) -> Result<Self, E> {
         Ok(Secret::new(value))
     }
 
-    // Only the loader produces secrets, and always as an owned `String`; a borrowed string comes from some other
-    // deserializer, so it is refused (without echoing it).
-    fn visit_str<E: serde::de::Error>(self, _value: &str) -> Result<Self::Value, E> {
+    fn from_bytes<E: de::Error>(value: Vec<u8>) -> Result<Self, E> {
+        drop(Secret::new(value));
+        Err(E::invalid_type(Unexpected::Other("bytes"), &EXPECTING))
+    }
+}
+
+impl SecretValue for Secret<Vec<u8>> {
+    const MARKER: &'static str = BYTES_MARKER;
+
+    fn from_string<E: de::Error>(value: String) -> Result<Self, E> {
+        drop(Secret::new(value));
+        Err(E::invalid_type(Unexpected::Other("a string"), &EXPECTING))
+    }
+
+    fn from_bytes<E: de::Error>(value: Vec<u8>) -> Result<Self, E> {
+        Ok(Secret::new(value))
+    }
+}
+
+/// Accepts only the loader's form: the variant [`LOADED_VARIANT`] whose payload is the value.
+struct Outer<S>(PhantomData<S>);
+
+impl<'de, S: SecretValue> Visitor<'de> for Outer<S> {
+    type Value = S;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(EXPECTING)
+    }
+
+    // A plain string or bytes from another deserializer: refused without echoing it (the defaults would).
+    fn visit_str<E: de::Error>(self, _value: &str) -> Result<S, E> {
+        Err(E::invalid_type(Unexpected::Other("a string"), &EXPECTING))
+    }
+
+    fn visit_bytes<E: de::Error>(self, _value: &[u8]) -> Result<S, E> {
+        Err(E::invalid_type(Unexpected::Other("bytes"), &EXPECTING))
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<S, A::Error> {
+        let (tag, payload) = data.variant_seed(Tag)?;
+        if !tag {
+            return Err(de::Error::invalid_type(Unexpected::Enum, &EXPECTING));
+        }
+        payload.newtype_variant_seed(Inner::<S>(PhantomData))
+    }
+}
+
+/// Whether the variant name is [`LOADED_VARIANT`]; the name itself is never kept or echoed.
+struct Tag;
+
+impl<'de> DeserializeSeed<'de> for Tag {
+    type Value = bool;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+        deserializer.deserialize_identifier(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Tag {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a variant name")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<bool, E> {
+        Ok(value == LOADED_VARIANT)
+    }
+}
+
+struct Inner<S>(PhantomData<S>);
+
+impl<'de, S: SecretValue> DeserializeSeed<'de> for Inner<S> {
+    type Value = S;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<S, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de, S: SecretValue> Visitor<'de> for Inner<S> {
+    type Value = S;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(EXPECTING)
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<S, E> {
+        S::from_string(value)
+    }
+
+    // The loader always hands over an owned value; a borrowed one is refused (and not echoed).
+    fn visit_str<E: de::Error>(self, _value: &str) -> Result<S, E> {
         Err(E::invalid_type(
-            Unexpected::Other("an inline string"),
-            &self,
+            Unexpected::Other("a borrowed string"),
+            &EXPECTING,
         ))
     }
-}
 
-#[derive(Clone, Copy)]
-struct BytesVisitor;
-
-impl<'de> Visitor<'de> for BytesVisitor {
-    type Value = Secret<Vec<u8>>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a secret reference loaded by okoala-config")
-    }
-
-    fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
-        Ok(Secret::new(value))
+    fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<S, E> {
+        S::from_bytes(value)
     }
 }
 
-struct Optional<V>(V);
+struct Optional<S>(PhantomData<S>);
 
-impl<'de, V: MarkedVisitor<'de>> Visitor<'de> for Optional<V> {
-    type Value = Option<V::Value>;
+impl<'de, S: SecretValue> Visitor<'de> for Optional<S> {
+    type Value = Option<S>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.expecting(f)
+        f.write_str(EXPECTING)
     }
 
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
         Ok(None)
     }
 
     fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
-        deserializer
-            .deserialize_newtype_struct(V::MARKER, self.0)
-            .map(Some)
+        required(deserializer).map(Some)
     }
 }
 
-trait MarkedVisitor<'de>: Visitor<'de> {
-    const MARKER: &'static str;
-}
-
-impl MarkedVisitor<'_> for TextVisitor {
-    const MARKER: &'static str = TEXT_MARKER;
-}
-
-impl MarkedVisitor<'_> for BytesVisitor {
-    const MARKER: &'static str = BYTES_MARKER;
+fn required<'de, D: Deserializer<'de>, S: SecretValue>(deserializer: D) -> Result<S, D::Error> {
+    deserializer.deserialize_newtype_struct(S::MARKER, Outer::<S>(PhantomData))
 }
 
 /// A required text secret.
 pub fn string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Secret<String>, D::Error> {
-    deserializer.deserialize_newtype_struct(TEXT_MARKER, TextVisitor)
+    required(deserializer)
 }
 
 /// A required binary secret.
 pub fn bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Secret<Vec<u8>>, D::Error> {
-    deserializer.deserialize_newtype_struct(BYTES_MARKER, BytesVisitor)
+    required(deserializer)
 }
 
 /// An optional text secret; use with `#[serde(default)]` so a missing key is `None`.
 pub fn optional_string<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Secret<String>>, D::Error> {
-    deserializer.deserialize_option(Optional(TextVisitor))
+    deserializer.deserialize_option(Optional(PhantomData))
 }
 
 /// An optional binary secret; use with `#[serde(default)]` so a missing key is `None`.
 pub fn optional_bytes<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Secret<Vec<u8>>>, D::Error> {
-    deserializer.deserialize_option(Optional(BytesVisitor))
+    deserializer.deserialize_option(Optional(PhantomData))
 }

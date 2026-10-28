@@ -16,9 +16,12 @@
 //! - an environment variable `OKOALA_<SECTION>__<KEY>` (further `__` separate nested keys) overrides the value
 //!   at that key; its value is read as a TOML value (`9090`, `true`, `"quoted"`, `[1, 2]`) and, when it does
 //!   not parse as one, as a plain string;
-//! - all errors are reported together, each with its section and key. Within one section, the first
-//!   structural error (unknown key, wrong type, missing field) ends that section's deserialization, as `serde`
-//!   stops there; every section is still checked, and every secret error is reported.
+//! - all errors are reported together, each with its section and key: every section is checked, and every
+//!   secret reference in a known section is fetched and checked, even where deserialization stops. Within one
+//!   section, `serde` stops at the first structural error (unknown key, wrong type, missing field), so a
+//!   section reports at most one of those, besides its secret errors;
+//! - error messages never contain values from the file or the environment: messages that field types produce
+//!   themselves (which may quote their input) are replaced by a generic "invalid value" at the key.
 //!
 //! ## Secrets
 //!
@@ -27,15 +30,20 @@
 //!
 //! ```toml
 //! [internal]
-//! token = { file = "/run/secrets/okoala/internal-token" }
+//! token = { secret_file = "/run/secrets/okoala/internal-token" }
 //! # or
-//! token = { env = "OKOALA_INTERNAL_TOKEN" }
+//! token = { secret_env = "OKOALA_INTERNAL_TOKEN" }
 //! ```
 //!
-//! From the environment, the same reference is `OKOALA_INTERNAL__TOKEN__FILE=/run/secrets/...` (or
-//! `__ENV=NAME`). A secret file must have mode 0400 or 0440; 0444 is accepted only under `/run/secrets`, where
-//! Kubernetes mounts Secrets. One trailing newline (`\n` or `\r\n`) is stripped from text secrets, and an empty
-//! secret is an error. Errors name the file, variable, section and key, never the value.
+//! From the environment, the same reference is `OKOALA_INTERNAL__TOKEN__SECRET_FILE=/run/secrets/...` (or
+//! `__SECRET_ENV=NAME`). A variable named by `secret_env` must not have an override's shape
+//! (`OKOALA_<SECTION>__<KEY>`).
+//!
+//! A secret file must be a regular file with mode 0400 or 0440; 0444 is accepted only under `/run/secrets`,
+//! where Kubernetes mounts Secrets (decided on the resolved path of the opened file). Files are opened
+//! non-blocking, so a FIFO cannot hang the loader. One trailing newline (`\n` or `\r\n`) is stripped from
+//! text secrets, which must then be a single non-blank line; byte secrets are taken as they are, and must not
+//! be empty. Errors name the file, variable, section and key, never the value.
 //!
 //! Limits: a secret read from an environment variable stays in the process environment, which this crate
 //! cannot clear; prefer files. A secret written inline by mistake is rejected, but the TOML parser has already

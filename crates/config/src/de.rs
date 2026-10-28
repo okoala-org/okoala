@@ -5,6 +5,7 @@
 //! secret references when a field asks for one (see [`crate::secret`]).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::value::StringDeserializer;
@@ -15,8 +16,10 @@ use serde::de::{
 use serde::forward_to_deserialize_any;
 use toml::Value;
 
-use crate::secret::{BYTES_MARKER, TEXT_MARKER};
-use crate::source::{Raw, SecretKind, SecretSource};
+use crate::secret::{BYTES_MARKER, LOADED_VARIANT, TEXT_MARKER};
+use crate::source::{
+    Raw, Reference, SecretKind, SecretSource, discard_bytes, finish, parse_reference,
+};
 
 /// A deserialization error and the key path it happened at, once known.
 #[derive(Debug)]
@@ -26,6 +29,14 @@ pub(crate) struct DeError {
 }
 
 impl DeError {
+    /// An error raised by okoala-config's own code, whose message is trusted not to contain values.
+    pub(crate) fn own(message: impl fmt::Display) -> Self {
+        Self {
+            path: None,
+            message: message.to_string(),
+        }
+    }
+
     fn at(mut self, path: &[String]) -> Self {
         if self.path.is_none() {
             self.path = Some(path.to_vec());
@@ -52,26 +63,68 @@ fn redact(unexpected: Unexpected<'_>) -> Unexpected<'_> {
     }
 }
 
-impl de::Error for DeError {
-    fn custom<T: fmt::Display>(msg: T) -> Self {
-        Self {
-            path: None,
-            message: msg.to_string(),
+struct OneOf(&'static [&'static str]);
+
+impl fmt::Display for OneOf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            [] => f.write_str("there are none"),
+            [only] => write!(f, "expected `{only}`"),
+            names => {
+                f.write_str("expected one of ")?;
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "`{name}`")?;
+                }
+                Ok(())
+            }
         }
+    }
+}
+
+/// Every message is built here from trusted parts: the expected types and names come from the section types,
+/// and field names are keys. Values from the file or environment are never included, and messages from the
+/// field types themselves (`custom`, which a `FromStr`-based type may fill with its input) are replaced by a
+/// generic one: the key path, added by the deserializer, says where the problem is.
+impl de::Error for DeError {
+    fn custom<T: fmt::Display>(_msg: T) -> Self {
+        Self::own("invalid value (rejected by the field's type; the value is not shown)")
     }
 
     fn invalid_type(unexpected: Unexpected<'_>, expected: &dyn Expected) -> Self {
-        Self::custom(format_args!(
+        Self::own(format_args!(
             "invalid type: {}, expected {expected}",
             redact(unexpected)
         ))
     }
 
     fn invalid_value(unexpected: Unexpected<'_>, expected: &dyn Expected) -> Self {
-        Self::custom(format_args!(
+        Self::own(format_args!(
             "invalid value: {}, expected {expected}",
             redact(unexpected)
         ))
+    }
+
+    fn invalid_length(len: usize, expected: &dyn Expected) -> Self {
+        Self::own(format_args!("invalid length {len}, expected {expected}"))
+    }
+
+    fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
+        Self::own(format_args!("unknown variant; {}", OneOf(expected)))
+    }
+
+    fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self {
+        Self::own(format_args!("unknown field `{field}`; {}", OneOf(expected)))
+    }
+
+    fn missing_field(field: &'static str) -> Self {
+        Self::own(format_args!("missing field `{field}`"))
+    }
+
+    fn duplicate_field(field: &'static str) -> Self {
+        Self::own(format_args!("duplicate field `{field}`"))
     }
 }
 
@@ -80,7 +133,13 @@ impl de::Error for DeError {
 pub(crate) struct Ctx<'a> {
     pub(crate) secrets: SecretSource<'a>,
     pub(crate) secret_errors: RefCell<Vec<DeError>>,
+    /// The secret references of the section being loaded, fetched before deserialization (so that references
+    /// `serde` never reaches, after a structural error, are still checked), by key path. Deserialization
+    /// takes the ones it reaches.
+    pub(crate) fetched: RefCell<Fetched>,
 }
+
+pub(crate) type Fetched = BTreeMap<Vec<String>, (Reference, Result<Vec<u8>, String>)>;
 
 pub(crate) struct ValueDe<'c, 'a> {
     value: Value,
@@ -112,9 +171,21 @@ impl<'c, 'a> ValueDe<'c, 'a> {
         kind: SecretKind,
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        match self.ctx.secrets.load(self.value, kind) {
-            Ok(Raw::Text(text)) => visitor.visit_string(text),
-            Ok(Raw::Bytes(bytes)) => visitor.visit_byte_buf(bytes),
+        let raw = parse_reference(self.value).and_then(|reference| {
+            let fetched = match self.ctx.fetched.borrow_mut().remove(&self.path) {
+                Some((fetched_ref, fetched)) if fetched_ref == reference => fetched,
+                Some((_, stale)) => {
+                    if let Ok(bytes) = stale {
+                        discard_bytes(bytes);
+                    }
+                    self.ctx.secrets.fetch(&reference)
+                }
+                None => self.ctx.secrets.fetch(&reference),
+            };
+            finish(fetched?, kind, &reference)
+        });
+        let raw = match raw {
+            Ok(raw) => raw,
             Err(message) => {
                 self.ctx.secret_errors.borrow_mut().push(DeError {
                     path: Some(self.path),
@@ -123,11 +194,72 @@ impl<'c, 'a> ValueDe<'c, 'a> {
                 // A placeholder so the rest of the section is still checked; the load fails anyway because an
                 // error was recorded, so the placeholder never leaves the loader.
                 match kind {
-                    SecretKind::Text => visitor.visit_string(String::new()),
-                    SecretKind::Bytes => visitor.visit_byte_buf(Vec::new()),
+                    SecretKind::Text => Raw::Text(String::new()),
+                    SecretKind::Bytes => Raw::Bytes(Vec::new()),
                 }
             }
+        };
+        visitor.visit_enum(Loaded { raw })
+    }
+}
+
+/// How the loader hands a secret to the visitor of [`crate::secret`]: as the newtype variant
+/// [`LOADED_VARIANT`] of an enum, a form no TOML value deserializes to, so those visitors can tell a value from
+/// the loader apart from one some other deserializer produced.
+struct Loaded {
+    raw: Raw,
+}
+
+impl<'de> EnumAccess<'de> for Loaded {
+    type Error = DeError;
+    type Variant = Self;
+
+    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self), DeError> {
+        let tag: StringDeserializer<DeError> = LOADED_VARIANT.to_owned().into_deserializer();
+        Ok((seed.deserialize(tag)?, self))
+    }
+}
+
+impl<'de> VariantAccess<'de> for Loaded {
+    type Error = DeError;
+
+    fn unit_variant(self) -> Result<(), DeError> {
+        Err(DeError::own("a loaded secret is a newtype variant"))
+    }
+
+    fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, DeError> {
+        seed.deserialize(Payload(self.raw))
+    }
+
+    fn tuple_variant<V: Visitor<'de>>(self, _len: usize, _visitor: V) -> Result<V::Value, DeError> {
+        Err(DeError::own("a loaded secret is a newtype variant"))
+    }
+
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, DeError> {
+        Err(DeError::own("a loaded secret is a newtype variant"))
+    }
+}
+
+/// The secret itself, handed over by value (`visit_string` or `visit_byte_buf`) so it is never copied.
+struct Payload(Raw);
+
+impl<'de> de::Deserializer<'de> for Payload {
+    type Error = DeError;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        match self.0 {
+            Raw::Text(text) => visitor.visit_string(text),
+            Raw::Bytes(bytes) => visitor.visit_byte_buf(bytes),
         }
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option unit
+        unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier ignored_any
     }
 }
 
@@ -221,9 +353,7 @@ impl<'de> de::Deserializer<'de> for ValueDe<'_, '_> {
             }
             Value::Table(table) if table.len() == 1 => {
                 let Some((variant, value)) = table.into_iter().next() else {
-                    return Err(
-                        <DeError as de::Error>::custom("expected a table with one key").at(&path),
-                    );
+                    return Err(DeError::own("expected a table with one key").at(&path));
                 };
                 let mut content_path = path.clone();
                 content_path.push(variant.clone());
@@ -236,10 +366,10 @@ impl<'de> de::Deserializer<'de> for ValueDe<'_, '_> {
                     .visit_enum(Enum { variant, content })
                     .map_err(|e| e.at(&path))
             }
-            _ => Err(<DeError as de::Error>::custom(
-                "expected a string, or a table with one key naming the variant",
-            )
-            .at(&path)),
+            _ => Err(
+                DeError::own("expected a string, or a table with one key naming the variant")
+                    .at(&path),
+            ),
         }
     }
 
@@ -299,10 +429,7 @@ impl<'de> MapAccess<'de> for Map<'_, '_> {
 
     fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, DeError> {
         let Some((key, value)) = self.pending.take() else {
-            return Err(
-                <DeError as de::Error>::custom("value requested before its key")
-                    .at(&self.parent.path),
-            );
+            return Err(DeError::own("value requested before its key").at(&self.parent.path));
         };
         let child = self.parent.child(value, key);
         let path = child.path.clone();
@@ -337,10 +464,7 @@ impl<'de> VariantAccess<'de> for ValueDe<'_, '_> {
     type Error = DeError;
 
     fn unit_variant(self) -> Result<(), DeError> {
-        Err(
-            <DeError as de::Error>::custom("a unit variant is given as a plain string")
-                .at(&self.path),
-        )
+        Err(DeError::own("a unit variant is given as a plain string").at(&self.path))
     }
 
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, DeError> {

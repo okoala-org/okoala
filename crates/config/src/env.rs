@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 /// A source of environment variables.
 pub trait Environment {
     /// The names of all variables. The loader reads the values only of the names it needs (override candidates
-    /// `OKOALA_<SECTION>__<KEY>` and variables named by `{ env = "..." }`), so other variables, which may hold
+    /// `OKOALA_<SECTION>__<KEY>` and variables named by `{ secret_env = "..." }`), so other variables, which may hold
     /// secrets, are never copied.
     fn names(&self) -> Vec<String>;
 
@@ -70,4 +70,13 @@ impl Environment for MapEnvironment {
     fn var(&self, name: &str) -> Option<String> {
         self.vars.get(name).cloned()
     }
+}
+
+/// The prefix of override variables.
+pub(crate) const OVERRIDE_PREFIX: &str = "OKOALA_";
+
+/// Whether a variable name has the shape of an override, `OKOALA_<SECTION>__<KEY>`.
+pub(crate) fn is_override_name(name: &str) -> bool {
+    name.strip_prefix(OVERRIDE_PREFIX)
+        .is_some_and(|rest| rest.contains("__"))
 }
