@@ -26,4 +26,6 @@ expect_used = "deny"
 panic = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# Skipping a value's drop also skips zeroizing any `Secret` it holds.
+mem_forget = "deny"
 todo = "warn"
