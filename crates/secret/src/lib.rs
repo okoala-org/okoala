@@ -55,7 +55,7 @@ impl ValidSecretT for Box<[u8]> {
     type RevealedT = [u8];
 
     fn bytes(&self) -> &[u8] {
-        self    
+        self
     }
 
     fn reveal(&self) -> &Self::RevealedT {
