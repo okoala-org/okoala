@@ -9,8 +9,10 @@
 //! responsibility lies with the users of this crate.
 
 use std::fmt;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
+/// Holds a secret value and helps prevent it from being accidentaly exposed
 pub struct Secret<T: Zeroize> {
     value: T,
 }
@@ -42,3 +44,12 @@ impl<T: Zeroize> Drop for Secret<T> {
         self.value.zeroize();
     }
 }
+
+// Constant time compare for Secret<T>
+impl<T: Zeroize + AsRef<[u8]>> PartialEq for Secret<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.as_ref().ct_eq(&other.value.as_ref()).into()
+    }
+}
+
+impl<T: Zeroize + AsRef<[u8]>> Eq for Secret<T> {}
