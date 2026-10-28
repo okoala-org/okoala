@@ -101,7 +101,7 @@ decision record, so `Context` does not grow into a bag of loosely related servic
 ## Layers and crates
 
 Crates are arranged in six layers. Dependencies point only downward. `xtask check-layers`
-runs in CI and fails on any upward or sideways edge the table does not allow.
+will run in CI and fail on any upward or sideways edge the table does not allow.
 
 | Layer | Crates | Rule |
 | --- | --- | --- |
@@ -109,7 +109,7 @@ runs in CI and fails on any upward or sideways edge the table does not allow.
 | L1 infrastructure | `okoala-config`, `okoala-limits`, `okoala-db` (pool, transactions, migrations, change log, notifier, leadership, jobs), `okoala-blob`, `okoala-http-client`, `okoala-dns`, `okoala-tls`, `okoala-telemetry` | no protocol or domain knowledge |
 | L2 identity and access | `okoala-directory` (tenants, domains, accounts, addresses, groups, credentials, admin roles), `okoala-auth` (authenticators, `Principal`), `okoala-policy` (authorisation, `Authorized<T>`) | only `okoala-policy` constructs `Authorized<T>` |
 | L3 domain services | `okoala-mail`, `okoala-outbound`, `okoala-calendar`, `okoala-contacts`, `okoala-sharing`, `okoala-search`, `okoala-push`, `okoala-chat`, `okoala-import` | own their SQL; every account-data function takes an `Authorized<…>` or runs as a system job |
-| L4 protocols and adapters | `okoala-jmap` and one method crate per area, `okoala-imap`, `okoala-smtp`, `okoala-dav`, `okoala-admin-api`, `okoala-internal-api`, `okoala-web`, `okoala-matrix` (push gateway, application service, admin-bot client), `okoala-provisioner` (Kubernetes reconciler, Hydra admin client) | never depend on `okoala-db`; only `okoala-provisioner` may depend on `kube-rs` |
+| L4 protocols and adapters | `okoala-jmap` and one method crate per area, `okoala-imap`, `okoala-smtp`, `okoala-dav`, `okoala-admin-api`, `okoala-internal-api`, `okoala-web`, `okoala-matrix` (push gateway, application service, admin-bot client), `okoala-provisioner` (Kubernetes reconciler, Hydra admin client) | depend on L0 to L3, but never on `okoala-db`; only `okoala-provisioner` may depend on `kube-rs` |
 | L5 binaries | `okoala` (CLI, role table, `serve`, `migrate`, admin CLI), `okoala-testkit`, `okoalactl` | `okoalactl` depends only on `okoala-config`, `okoala-secret` and `okoala-core`; `okoala` never depends on `okoalactl` |
 
 ```mermaid
@@ -195,7 +195,8 @@ development and tests). Raw messages are stored exactly as received.
   guarded by `state = 'live'`.
 - **Garbage collection** (led): claim an unreferenced blob by setting `deleting` after
   re-checking references → delete the bytes outside any transaction → forget the row. The
-  grace period is 7 days by default and never shorter than the backup interval.
+  grace period is never shorter than the point-in-time recovery window (30 days by
+  default), so a restored database never references a collected blob.
 - **Read**: whole-blob reads and spooled copies verify the hash; MIME parts use ranged
   reads; everything streams.
 - Process-local caches of blob bytes are invalidated before the bytes are deleted.
@@ -276,12 +277,17 @@ garbage collection).
   `serde(deny_unknown_fields)` and registers it; the loader rejects unknown sections and
   reports all errors at once. Values come from the file or `OKOALA_<SECTION>__<KEY>`
   variables; secret values only from files or variables, never inline in a ConfigMap.
-- `okoala-secret` provides `Secret<T>`: a redacting `Debug`, no `Display`, no
-  `Serialize`, zeroized on drop, and explicit constant-time comparison. It is a pure type
-  with no I/O. Loading secrets and the file-mode rule live in `okoala-config`; the
-  database URL type, whose password is a `Secret`, lives in `okoala-db`.
-- The `okoala` binary disables core dumps for itself at start, because secrets that live
-  for the whole process are not covered by zeroize-on-drop.
+- `okoala-secret` provides `Secret<T>`, which reduces accidental exposure: a redacting
+  `Debug`, no `Display` and no `Serialize`. Reading the value takes an explicit call,
+  `reveal_value()`. Comparisons (`compare`, `compare_value`, `compare_bytes`) are
+  constant-time for inputs of equal length; a length difference returns at once, so the
+  length is not hidden. An empty stored secret never matches. Only the wrapped value is
+  zeroized on drop; copies made before wrapping or from the revealed value are not. It is
+  a pure type with no I/O. Loading secrets and the file-mode rule live in
+  `okoala-config`; the database URL type, whose password is a `Secret`, lives in
+  `okoala-db`.
+- The `okoala` binary will disable core dumps for itself at start, because secrets that
+  live for the whole process are not covered by zeroize-on-drop.
 - The internal listener ([0020](../adr/0020-internal-api.md)) serves probes and metrics,
   and `/internal/v1/*` behind a bearer secret and a NetworkPolicy.
 
@@ -306,8 +312,8 @@ signed-in tenant's homeserver only. The client is tested against the real server
   HTTP through the Ingress; certificates from cert-manager.
 - Hardened pods: non-root, read-only root filesystem, all capabilities dropped,
   `RuntimeDefault` seccomp; a distroless image.
-- No secret is generated at chart render time. The chart is checked with `helm lint`,
-  `helm template`, `kubeconform -strict` and `okoala serve --check`, and installed on a
+- No secret is generated at chart render time. CI will check the chart with `helm lint`,
+  `helm template`, `kubeconform -strict` and `okoala serve --check`, and install it on a
   kind cluster nightly.
 - Backups: CloudNativePG WAL archiving and daily base backups to an off-host S3 target
   with 30 days of point-in-time recovery; blobs by bucket versioning or a daily copy; chat

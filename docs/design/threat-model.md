@@ -45,7 +45,7 @@ they are inside the system by design.
 9. **A compromised OKoala pod.** Remote code execution in a serving role, or a stolen
    provisioner token.
 10. **A compromised developer, operator or CI machine, or a compromised dependency.**
-    Steals credentials stored on the machine, or tampers with code, builds or downloads.
+    Steals credentials, or tampers with code, builds or downloads.
 
 ## Trust boundaries
 
@@ -105,7 +105,7 @@ flowchart LR
 
 | Threat | Mitigation |
 | --- | --- |
-| Parser exploits in IMAP, SMTP, MIME, iCalendar, vCard, DAV XML, JMAP JSON | Rust with no `unsafe` (I17); `indexing_slicing` and `as_conversions` denied in parser crates; `cargo-fuzz` targets for every parser, short runs per change and long runs nightly; Tier 1 review of every line |
+| Parser exploits in IMAP, SMTP, MIME, iCalendar, vCard, DAV XML, JMAP JSON | Rust with no `unsafe` in OKoala's own code (I17); `indexing_slicing` and `as_conversions` denied in parser crates; `cargo-fuzz` targets for every parser will run briefly on each change and longer nightly; Tier 1 review of every line |
 | Resource exhaustion by unauthenticated hosts (slowloris, huge literals, SMTP smuggling) | line, literal and message size limits; SMTP smuggling and slowloris defences; per-IP throttles and authentication-failure limiters shared across replicas ([0007](../adr/0007-limits-as-requirements.md)) |
 | Credential guessing | failures limited per IP and per account in PostgreSQL; MFA in Kratos; app passwords are random, scoped and revocable |
 | Interception or downgrade | TLS on every listener (cert-manager); MTA-STS for outbound mail; DAV Basic only over TLS; STARTTLS on IMAP 143 only if enabled |
@@ -147,7 +147,7 @@ flowchart LR
 | Account linking by email address | never done, by any code path; rebinding is an operator action |
 | Tokens accepted for the wrong audience, tenant or a disabled account | verifier requires `aud = okoala`, the `okoala` scope, a `tenant` claim and a known, enabled account |
 | Consent page CSRF or skipped checks | CSRF-protected consent page; checks run on every consent, shown or skipped |
-| Development tokens in production | `dev-auth` is a cargo feature; CI checks the release binary does not contain it |
+| Development tokens in production | `dev-auth` is a cargo feature; CI will check that the release binary does not contain it |
 | Webhook forgery | Kratos webhooks need their own secret on the internal listener |
 | Drift between Kratos and OKoala | hourly reconciliation that reports drift, never links or creates, and disables at most a configured number per run |
 
@@ -193,12 +193,12 @@ flowchart LR
 
 | Threat | Mitigation |
 | --- | --- |
-| Credentials stolen from a developer or operator machine | one SSH key per machine and purpose, never copied, hardware-backed where possible; no long-lived secrets in shell configuration files; short-lived, narrowly scoped tokens; CI and deploy credentials never on developer machines; inventories of hosts, keys and tokens reviewed regularly |
+| Credentials stolen from a developer or operator machine | least-privilege, short-lived credentials; CI and deploy credentials never on developer machines |
 | A compromised build machine | release images are built only by CI on ephemeral, project-only runners ([0012](../adr/0012-infrastructure.md)) |
 | Over-privileged CI | least-privilege `GITHUB_TOKEN` permissions; OIDC federation instead of stored secrets where possible; environment-scoped staging secrets that cannot reach production |
-| Malicious or vulnerable dependencies | `cargo deny` (licences, sources, bans) and `cargo audit` in CI; a new advisory fails CI; pinned toolchain; third-party test images pinned by digest and mirrored |
-| Tampered releases | releases built from the public repository, signed with Sigstore (keyless cosign) with build provenance; reproducible builds checked by building twice; SBOM with each release |
-| Unreviewed code in the isolation core | T0 written by hand and reviewed adversarially; `xtask check-trust` (I17); every published commit reviewed ([checklist](../reviews/CHECKLIST.md)) |
+| Malicious or vulnerable dependencies | `cargo deny` in CI; `cargo audit` will be added, so that a new advisory fails CI; pinned toolchain; third-party test images pinned by digest and mirrored |
+| Tampered releases | releases will be built from the public repository by CI, signed with Sigstore (keyless cosign) with build provenance, checked for reproducibility by building twice, and shipped with an SBOM |
+| Unreviewed code in the isolation core | T0 written by hand and reviewed adversarially; `xtask check-trust` in CI (I17); every published commit reviewed ([checklist](../reviews/CHECKLIST.md)) |
 
 ## Residual risks
 
@@ -225,9 +225,10 @@ These are accepted for v1, or reduced but not removed.
   Chat backups stay unreadable; database and blob backups do not.
 - **The hand-written T0 claim** is checked mechanically against commit trailers, but rests
   on the engineers' honesty.
-- **Parsers of untrusted input** are protected by fuzzing and review, not by proof.
+- **Parsers of untrusted input** are protected by review and, once the fuzz targets
+  exist, by fuzzing; not by proof.
 - **Deliverability and reputation** of new domains depend on factors outside OKoala.
-- **No external audit** has been made; assurance comes from public CI, conformance and
+- **No external audit** has been made; assurance is to come from public CI, conformance and
   interop results, fuzzing, dependency audits, adversarial reviews and public reports.
 
 ## Keeping this document current

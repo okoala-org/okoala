@@ -1,8 +1,13 @@
 # Invariants
 
-These are the rules every change to OKoala must keep. Each one has a test or a CI check;
-where a rule is enforced by the type system, the type is named. A change that needs to
-break an invariant needs a decision record first.
+These are the rules every change to OKoala must keep. OKoala is in early development:
+this describes the design the code is being built to, and most of the tests and checks
+named here will be added with the code they protect. Each invariant gets a test or a CI
+check; where a rule is enforced by the type system, the type is named. A change that
+needs to break an invariant needs a decision record first.
+
+Checks that exist today: `xtask check-trust` (I17), `xtask check-spdx` and `cargo deny`
+run in CI.
 
 The [architecture](architecture.md) explains the components named here; the
 [threat model](threat-model.md) maps threats to these invariants.
@@ -25,7 +30,7 @@ The [architecture](architecture.md) explains the components named here; the
 | I14 | serving processes hold no deployment powers | escalation from a compromised pod |
 | I15 | chat SSO consent only within the tenant | cross-tenant chat takeover |
 | I16 | chat volumes and Secrets kept until an explicit purge | loss of a tenant's Matrix identity |
-| I17 | T0 written by hand; no `unsafe`; strict lints in T1 | unreviewed code in the core |
+| I17 | T0 written by hand; no `unsafe` in OKoala's own code; strict lints in T1 | unreviewed code in the core |
 
 ## I1. Tenant key and row-level security
 
@@ -78,7 +83,7 @@ No network I/O, blob I/O or CPU-heavy work runs inside a transaction.
   blocks every other write to that account and ties up a connection.
 - **Enforced by**: the write closure makes the transaction's extent explicit; L3 SQL
   modules (`*/src/sql/*.rs`) may not import the blob, HTTP or CPU-pool crates
-  (`xtask check-layers`); `statement_timeout` and `idle_in_transaction_session_timeout`;
+  (`xtask check-layers`, to be added); `statement_timeout` and `idle_in_transaction_session_timeout`;
   a metric and an alert on transactions over 200 ms; an item on the
   [review checklist](../reviews/CHECKLIST.md).
 
@@ -89,7 +94,7 @@ Protocol crates reach account data only through `Authorized<T>`.
 - **Why**: authorisation is decided once, in one module, for every protocol, instead of
   being re-implemented (and missed) per protocol.
 - **Enforced by**: the constructor of `Authorized<T>` is private to `okoala-policy`;
-  protocol crates cannot depend on `okoala-db` (`xtask check-layers`); the policy matrix
+  protocol crates cannot depend on `okoala-db` (`xtask check-layers`, to be added); the policy matrix
   test covers every object type and action through every protocol, and CI fails if an
   object type has no matrix entry.
 
@@ -131,7 +136,10 @@ Every credential-bearing value is a `Secret<T>`; logs never contain one.
 
 - **Why**: secrets leak through `Debug` output, error messages and serialisation far more
   often than through attacks.
-- **Enforced by**: `Secret<T>` has a redacting `Debug`, no `Display` and no `Serialize`;
+- **Enforced by**: `Secret<T>` reduces accidental exposure: a redacting `Debug`, no
+  `Display` and no `Serialize`; reading the value needs an explicit `reveal_value()`,
+  which review treats as a point to check. Only the wrapped value is zeroized on drop;
+  copies made before wrapping or from the revealed value are not;
   a log-scrubbing test runs every integration test with log capture and fails on any known
   test secret in the output.
 
@@ -209,9 +217,11 @@ with confirmation after the retention period. Volumes are created with
 
 T0 code ([0022](../adr/0022-trust-levels.md)) is written by hand: no commit touching a T0
 path carries a `Co-Authored-By` trailer naming an AI. T0 and T1 crates use
-`#![forbid(unsafe_code)]`, and T1 crates pass the strict clippy set.
+`#![forbid(unsafe_code)]`, so there is no `unsafe` in OKoala's own code, and T1 crates
+pass the strict clippy set.
 
 - **Why**: the isolation and secret-handling core must be code that a person wrote and
-  owns, and no crate needs `unsafe`.
+  owns, and no OKoala crate needs `unsafe`.
 - **Enforced by**: `xtask check-trust` in CI, over the full history of the T0 paths listed
-  in [TRUST_LEVELS.toml](../../TRUST_LEVELS.toml); it also checks the crate attributes.
+  in [TRUST_LEVELS.toml](../../TRUST_LEVELS.toml); a check of the crate attributes will be
+  added to it.
