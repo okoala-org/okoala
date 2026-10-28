@@ -5,12 +5,12 @@
 ## Context
 
 OKoala stores tenants, accounts, mail metadata, calendars, contacts, change logs and job
-queues in a relational database. A prototype of OKoala supported both SQLite and
-PostgreSQL behind one store facade. Keeping two engines meant two schemas, two query sets,
-two migration sets and two concurrency models. Behaviour that held on one engine did not
-always hold on the other: a transaction that blocked other writers on SQLite did not on
-PostgreSQL, so tests passed for the wrong reason. The facade itself was large and every
-feature had to touch it.
+queues in a relational database. Supporting two engines, such as SQLite and PostgreSQL
+behind one store facade, means two schemas, two query sets, two migration sets and two
+concurrency models. Behaviour that holds on one engine does not always hold on the other:
+a transaction that blocks other writers on SQLite does not on PostgreSQL, so tests can
+pass for the wrong reason. The facade itself grows large, and every feature has to touch
+it.
 
 OKoala's correctness rests on database features: row locks taken at the start of a write,
 `FOR UPDATE SKIP LOCKED` for job claims, advisory locks for leadership, `LISTEN/NOTIFY`

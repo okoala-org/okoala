@@ -17,8 +17,8 @@ collisions but make the order depend on when work started rather than on review.
   the number, the name and the change it belongs to.
 - Each change carries at most one migration.
 - CI checks that the files and the registry agree, with no gaps or duplicates.
-- **Pre-release squash**: until the first staging deployment with real users, the initial
-  migrations may be squashed once. After that, migrations are append-only.
+- **Pre-release squash**: before any installation holds data that must be kept, the
+  initial migrations may be squashed once. After that, migrations are append-only.
 - Migrations are expand and contract: a release's migrations work with the previous
   release's binary, and destructive steps wait one release. `okoala serve` refuses a
   schema newer than it knows or older than it needs.

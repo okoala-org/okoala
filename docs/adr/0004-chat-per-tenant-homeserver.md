@@ -101,8 +101,8 @@ restore-drill`), which supplies the private key.
 
 - **One homeserver per installation.** Rejected: the permanent `server_name` would bind
   every tenant to the installation's domain.
-- **Chat after v1.** Rejected: the client side and the push gateway already existed, and
-  the tenancy design could be validated first.
+- **Chat after v1.** Rejected: a homeserver per tenant can be built from the start, which
+  avoids a later move of tenants' chat identities.
 - **The provisioner as a separate binary.** Rejected: its powers come from its
   ServiceAccount, not its binary, so separation would not narrow them.
 - **A delegated chat subdomain only** (4a). Rejected: user IDs on a subdomain, when the

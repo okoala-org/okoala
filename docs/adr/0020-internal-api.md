@@ -13,9 +13,12 @@ that was assumed private.
 ## Decision
 
 - **One internal listener per process**, on port 9090.
-- `/healthz` and `/readyz` are unauthenticated, as are `/metrics` for Prometheus.
+- Only `/healthz`, `/readyz` and `/metrics` are unauthenticated.
 - **Every `/internal/v1/*` route requires `Authorization: Bearer`** with the
-  installation's internal secret, compared in constant time.
+  installation's internal secret, held as a `Secret<T>` and compared with its
+  constant-time comparison (constant-time for inputs of equal length; the length is not
+  hidden, which a fixed-length random secret makes harmless; an empty stored secret never
+  matches).
 - Kratos webhooks go to `/internal/v1/identity-hook` with their own secret.
 - A **NetworkPolicy** restricts the listener to the `okoala` namespace. The chat namespace
   cannot reach it.

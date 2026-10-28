@@ -35,8 +35,8 @@ engine to WebAssembly for the client; another is to test both against the same v
 
 ## Alternatives considered
 
-- **Another time library.** Not chosen: the recurrence engine carried over from the
-  prototype is built on `chrono`, and the wrapper addresses the panics.
+- **Another time library.** Not chosen: the recurrence engine OKoala uses is built on
+  `chrono`, and the wrapper addresses the panics.
 - **A shared Rust core compiled to WASM for the client.** Rejected for v1: larger
   bundles, a harder build, and the client's other logic (sync, storage, service worker)
   is browser code anyway.

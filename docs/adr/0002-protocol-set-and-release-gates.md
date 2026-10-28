@@ -52,7 +52,7 @@ replayed in CI, so a real-client session is recorded once and checked on every c
   multi-append totals), which are part of [0007](0007-limits-as-requirements.md).
 - Element X is added as a chat gate once its OIDC-native login is shown to work. Mobile
   Element apps are manual checks only, as native push comes after v1.
-- Each manual gate costs effort per release; Outlook (IMAP only) can be added later.
+- Each manual gate is run again for every release; Outlook (IMAP only) can be added later.
 
 ## Alternatives considered
 

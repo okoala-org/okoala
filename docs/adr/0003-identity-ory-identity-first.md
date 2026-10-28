@@ -7,7 +7,7 @@
 OKoala needs identities, passwords, multi-factor authentication, recovery, sessions and
 OAuth 2.0/OIDC tokens for the web client, JMAP and each tenant's chat homeserver. Writing
 an identity provider is a large security-critical project. Ory Kratos (identities) and Ory
-Hydra (OAuth 2.0 and OIDC) are maintained, Apache-2.0 and worked well in a prototype.
+Hydra (OAuth 2.0 and OIDC) are maintained, Apache-2.0 and widely deployed.
 
 Most account-takeover bugs in multi-tenant systems are not in the identity provider but in
 the glue: which tenant an identity belongs to, who may set that, and whether two records
@@ -34,10 +34,10 @@ cannot do OAuth against a self-hosted provider, so they need another credential.
   password hashes.
 - **Login, invitation, recovery, settings and consent pages** are part of the web client
   bundle, served by OKoala and using Kratos's browser flows.
-- **Development tokens** exist only in a build with the cargo feature `dev-auth`. CI checks
+- **Development tokens** exist only in a build with the cargo feature `dev-auth`. CI will check
   that the release binary does not contain it.
 - **OAUTHBEARER/XOAUTH2** for IMAP and SMTP come after v1, behind a cargo feature that
-  release builds leave off and CI checks like `dev-auth`.
+  release builds leave off and CI will check like `dev-auth`.
 
 ## Consequences
 

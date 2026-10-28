@@ -45,7 +45,7 @@ Paths are added to T0 as the crates are created; today the list holds `crates/se
 
 - `xtask check-trust` runs in CI. It reads the T0 paths from `TRUST_LEVELS.toml`, fails if
   any commit in the history that touches them carries a `Co-Authored-By` trailer naming an
-  AI, and checks the crate attributes (invariant I17).
+  AI (invariant I17). A check of the crate attributes will be added to it.
 - The check catches mistakes. The claim that T0 is hand-written rests on the engineers'
   honesty, and is stated publicly in the README.
 - Adversarial reviews of T0 are published in sanitized form once every finding is fixed or
@@ -68,7 +68,7 @@ Paths are added to T0 as the crates are created; today the list holds `crates/se
 - **All code reviewed the same way.** Rejected: one review standard cannot be both
   affordable for all code and strong enough for the isolation core.
 - **External audits as the main assurance.** Not chosen: an audit covers one version.
-  OKoala relies on evidence anyone can re-check on every commit: public CI, conformance
+  OKoala relies on evidence anyone can re-check on every commit, built up as the code is: public CI, conformance
   results, fuzzing, dependency audits, reproducible and signed builds, and the public
   review records.
 - **A per-file "Author" header.** Rejected: files change hands; commit trailers record

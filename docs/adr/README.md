@@ -21,7 +21,7 @@ The design they add up to is described in [docs/design](../design/architecture.m
 | [0010](0010-calendar-data-model.md) | Calendar data model: JSCalendar-bis and materialised occurrences | Accepted, 2026-10-22 |
 | [0011](0011-licensing.md) | Licensing of OKoala and its dependencies | Accepted, 2026-10-22 |
 | [0012](0012-infrastructure.md) | Build, CI and staging infrastructure | Accepted, 2026-10-22 |
-| [0013](0013-no-prototype-data-migration.md) | No database migration from the prototype; protocol-level import | Accepted, 2026-10-22 |
+| [0013](0013-no-database-migration-protocol-import.md) | No database-level migration; protocol-level import | Accepted, 2026-10-22 |
 | [0014](0014-concurrency-and-state-model.md) | Concurrency and state model | Accepted, 2026-10-22 |
 | [0015](0015-change-log-retention.md) | Change-log retention | Accepted, 2026-10-22 |
 | [0016](0016-search-engine.md) | Full-text search with tantivy behind an indexer role | Accepted, 2026-10-22 |
