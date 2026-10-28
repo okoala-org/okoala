@@ -48,6 +48,11 @@ struct ServeArgs {
 }
 
 fn main() -> ExitCode {
+    // Before anything else, in particular before any secret is loaded.
+    if let Err(e) = okoala::hardening::disable_core_dumps() {
+        eprintln!("okoala: {e}");
+        return ExitCode::FAILURE;
+    }
     // `try_parse` rather than `parse`, which exits the process itself.
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -63,18 +68,30 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Serve(args) => match run_serve(&args) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("okoala: {e}");
+            Err(errors) => {
+                for e in errors {
+                    eprintln!("okoala: {e}");
+                }
                 ExitCode::FAILURE
             }
         },
     }
 }
 
-fn run_serve(args: &ServeArgs) -> Result<(), serve::ServeError> {
+/// Loads the configuration and selects the roles, reporting the errors of both in one run.
+fn run_serve(args: &ServeArgs) -> Result<(), Vec<serve::ServeError>> {
     let table = roles::all();
-    let selected = serve::select(&table, args.roles.as_deref())?;
-    let config = serve::load(&args.config, &table, &ProcessEnvironment)?;
+    let config = serve::load(&args.config, &table, &ProcessEnvironment);
+    let selected = serve::select(&table, args.roles.as_deref());
+    let (config, selected) = match (config, selected) {
+        (Ok(config), Ok(selected)) => (config, selected),
+        (config, selected) => {
+            return Err([config.err(), selected.err()]
+                .into_iter()
+                .flatten()
+                .collect());
+        }
+    };
     let sections: Vec<_> = config.section_names().collect();
     println!(
         "configuration {} is valid (sections: {})",

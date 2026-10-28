@@ -3,9 +3,10 @@
 
 //! # Okoala
 //!
-//! The `okoala` binary's library part: the role table, the sections every process loads, and `serve`. Kept
+//! The `okoala` binary's library part: the role table, the sections every process loads, startup hardening, and `serve`. Kept
 //! as a library so integration tests (and later `okoala-testkit`) can drive it.
 
+pub mod hardening;
 pub mod process;
 pub mod roles;
 pub mod serve;
