@@ -14,7 +14,8 @@ use okoala_secret::Secret;
 use zeroize::Zeroize;
 
 /// Counts calls to `zeroize`; the counter is shared so the test can read it after the
-/// probe is gone.
+/// probe is gone. It has no `AsRef<[u8]>`: wrapping and dropping a secret must not need
+/// one (only comparing does).
 struct Probe {
     zeroized: Rc<Cell<u32>>,
 }

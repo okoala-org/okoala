@@ -30,6 +30,14 @@ macro_rules! assert_not_impl {
     };
 }
 
+// No operators for comparing: comparisons go through the explicit, constant-time
+// `compare` and `compare_value`, so they stand out in review.
+assert_not_impl!(Secret<String>: PartialEq);
+assert_not_impl!(Secret<String>: PartialEq<str>);
+assert_not_impl!(Secret<String>: PartialEq<&'static str>);
+assert_not_impl!(Secret<Vec<u8>>: PartialEq<[u8]>);
+assert_not_impl!(Secret<String>: PartialOrd);
+
 // No way to print the value except `Debug`, which redacts.
 assert_not_impl!(Secret<String>: Display);
 
