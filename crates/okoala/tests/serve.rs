@@ -159,3 +159,24 @@ fn usage_errors_exit_2() {
     assert_eq!(okoala(&["nope"]).status.code(), Some(2));
     assert!(okoala(&["serve", "--help"]).status.success());
 }
+
+#[test]
+fn unknown_roles_and_config_errors_are_reported_together() {
+    let dir = temp_dir("roles-and-config");
+    let config = write_config(&dir, "[imap]\n");
+    let out = okoala(&[
+        "serve",
+        "--config",
+        config.to_str().unwrap(),
+        "--roles",
+        "imap",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("[imap]: unknown section"), "{stderr}");
+    assert!(
+        stderr.contains("[internal]: missing field `token`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("unknown role imap"), "{stderr}");
+}
