@@ -62,12 +62,12 @@ impl Server {
     /// Sends `raw` on a new connection and returns everything the server sends back until it closes.
     async fn raw(&self, raw: &[u8]) -> String {
         let mut stream = TcpStream::connect(self.addr).await.unwrap();
-        stream.write_all(raw).await.unwrap();
+        let _ = stream.write_all(raw).await;
         let mut out = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut out))
+        // A reset (a connection closed over the cap) ends the answer too.
+        let _ = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut out))
             .await
-            .expect("the server did not close the connection")
-            .unwrap();
+            .expect("the server did not close the connection");
         String::from_utf8_lossy(&out).into_owned()
     }
 
@@ -320,4 +320,145 @@ async fn connections_over_the_cap_are_closed() {
     assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     drop(first);
     server.stop().await;
+}
+
+/// Reads until the server closes `stream`; returns how long that took.
+async fn time_to_close(stream: &mut TcpStream) -> Duration {
+    let start = std::time::Instant::now();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut out))
+        .await
+        .expect("the connection was not closed")
+        .ok();
+    start.elapsed()
+}
+
+#[tokio::test]
+async fn silent_and_idle_connections_are_closed_after_the_header_timeout() {
+    let server = Server::start_with(Limits {
+        header_read_timeout: Duration::from_millis(300),
+        ..Limits::default()
+    })
+    .await;
+    // Connected, nothing sent.
+    let mut silent = TcpStream::connect(server.addr).await.unwrap();
+    let waited = time_to_close(&mut silent).await;
+    assert!(waited < Duration::from_secs(3), "{waited:?}");
+    // One response, then idle on a kept-alive connection.
+    let mut idle = TcpStream::connect(server.addr).await.unwrap();
+    idle.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 1024];
+    let n = idle.read(&mut buf).await.unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+    let waited = time_to_close(&mut idle).await;
+    assert!(waited < Duration::from_secs(3), "{waited:?}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn probes_get_through_once_idle_sockets_time_out() {
+    let server = Server::start_with(Limits {
+        max_connections: 4,
+        header_read_timeout: Duration::from_millis(300),
+        ..Limits::default()
+    })
+    .await;
+    // Every slot taken by a socket that sends nothing.
+    let mut idle = Vec::new();
+    for _ in 0..4 {
+        idle.push(TcpStream::connect(server.addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if server
+            .get("/healthz", &[])
+            .await
+            .starts_with("HTTP/1.1 200")
+        {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "healthz still refused after {:?}",
+            start.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let metrics = server.get("/metrics", &[]).await;
+    assert!(
+        metrics.contains("okoala_internal_connections_rejected_total "),
+        "{metrics}"
+    );
+    drop(idle);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn head_is_allowed_on_probe_and_scrape_routes() {
+    let server = Server::start().await;
+    for path in ["/healthz", "/readyz", "/metrics"] {
+        let response = server
+            .raw(format!("HEAD {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes())
+            .await;
+        assert_eq!(status(&response), 200, "{path}: {response}");
+        assert!(
+            response.ends_with("\r\n\r\n"),
+            "a body was sent: {response}"
+        );
+    }
+    let right = format!("Authorization: Bearer {TOKEN}");
+    let head_ping = server
+        .raw(
+            format!(
+                "HEAD /internal/v1/ping HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{right}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await;
+    assert_eq!(status(&head_ping), 405, "{head_ping}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn refused_requests_are_counted_under_their_route() {
+    let server = Server::start().await;
+    server
+        .raw(b"POST /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await;
+    server
+        .raw(b"GET /readyz HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
+        .await;
+    server.get("/internal/v1/ping", &[]).await;
+    server.get("/internal/v1/other", &[]).await;
+    let metrics = server.get("/metrics", &[]).await;
+    for line in [
+        "okoala_internal_requests_total{route=\"healthz\",status=\"405\"} 1",
+        "okoala_internal_requests_total{route=\"readyz\",status=\"413\"} 1",
+        "okoala_internal_requests_total{route=\"ping\",status=\"401\"} 1",
+        "okoala_internal_requests_total{route=\"internal_unknown\",status=\"401\"} 1",
+    ] {
+        assert!(metrics.contains(line), "{line}\n{metrics}");
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_long_for_a_half_sent_request() {
+    let server = Server::start().await;
+    let mut half = TcpStream::connect(server.addr).await.unwrap();
+    half.write_all(b"GET /hea").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let start = std::time::Instant::now();
+    // `stop` fails the test if serve returns an error (a drain-deadline failure).
+    server.stop().await;
+    let waited = start.elapsed();
+    let defaults = Limits::default();
+    assert!(
+        waited <= defaults.header_read_timeout + Duration::from_millis(500),
+        "{waited:?}"
+    );
+    drop(half);
 }
