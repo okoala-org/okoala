@@ -42,7 +42,7 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
         self.value.as_ref().ct_eq(other.as_ref()).into()
     }
 
-    /// Constant time compare between `Secret<T>` and `T`
+    /// Constant time compare between `Secret<T>` and bytes
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     pub fn compare_bytes(&self, other: &[u8]) -> bool {
         self.value.as_ref().ct_eq(other).into()
