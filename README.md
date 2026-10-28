@@ -29,6 +29,8 @@ the `okoalactl` installer.
 
 **Status**: Early Development. **NOT READY** for Testing or Production.
 
+**Design**: [architecture](docs/design/architecture.md), [invariants](docs/design/invariants.md), [threat model](docs/design/threat-model.md), [decision records](docs/adr/README.md), [review checklist](docs/reviews/CHECKLIST.md) and [security policy](SECURITY.md).
+
 ## License
 
 Copyright © 2026 IASoft (PVT) LTD.
