@@ -6,12 +6,13 @@
 //! [`run`] initialises logging, starts the process's tasks in a `JoinSet` (for now only the internal
 //! listener; each selected role's `run(ctx, shutdown)` joins it with the first role crate), and waits for
 //! SIGTERM or SIGINT. Shutdown then marks the process not ready, cancels the shared shutdown token, and waits
-//! up to [`SHUTDOWN_DEADLINE`] for every task to finish. A task that ends on its own before shutdown, with an
-//! error, `Ok` or a panic, ends the process with an error (§4.1: Kubernetes restarts it).
+//! up to [`SHUTDOWN_DEADLINE`] for every task to finish. A second signal during that wait aborts the tasks at
+//! once, and the process exits with 128 + the signal number (143 for SIGTERM, 130 for SIGINT). A task that
+//! ends on its own before shutdown, with an error, `Ok` or a panic, ends the process with an error (§4.1:
+//! Kubernetes restarts it).
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -22,6 +23,7 @@ use okoala_config::{Config, ConfigErrors, Environment, Loader, Registry, Registr
 use okoala_internal_api::{InternalApi, InternalSection, Limits, Readiness};
 use okoala_telemetry::{Metrics, TelemetryError, TelemetrySection};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -139,9 +141,45 @@ pub fn load(
         .map_err(ServeError::Config)
 }
 
+/// A signal that stops the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSignal {
+    /// SIGTERM (what Kubernetes sends).
+    Term,
+    /// SIGINT (Ctrl-C).
+    Int,
+}
+
+impl StopSignal {
+    /// The signal's name, as logged.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Term => "SIGTERM",
+            Self::Int => "SIGINT",
+        }
+    }
+
+    /// The exit code of a process this signal aborted: 128 + the signal number, as a shell reports it.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            Self::Term => 143,
+            Self::Int => 130,
+        }
+    }
+}
+
+/// How the process stopped, when it stopped without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// Every task finished after the first signal.
+    Clean,
+    /// A second signal arrived while the tasks were finishing; they were aborted.
+    Aborted(StopSignal),
+}
+
 /// Runs the process for `config` and the `selected` roles until SIGTERM or SIGINT, then shuts down. Installs
 /// the global log subscriber and panic hook first, so call it once per process.
-pub fn run(config: Config, selected: &[&RoleDescriptor]) -> Result<(), Vec<ServeError>> {
+pub fn run(config: Config, selected: &[&RoleDescriptor]) -> Result<Stopped, Vec<ServeError>> {
     let telemetry = config
         .get::<TelemetrySection>()
         .cloned()
@@ -153,28 +191,43 @@ pub fn run(config: Config, selected: &[&RoleDescriptor]) -> Result<(), Vec<Serve
         .build()
         .map_err(|e| vec![ServeError::Runtime(e)])?;
     let result = runtime.block_on(async {
-        let signal = shutdown_signal().map_err(|e| vec![ServeError::Runtime(e)])?;
-        serve_until(config, selected, signal).await
+        // Installed before anything listens, so an early signal is not missed (or fatal).
+        let mut signals = Signals::new().map_err(|e| vec![ServeError::Runtime(e)])?;
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                let signal = signals.recv().await;
+                if tx.send(signal).await.is_err() {
+                    break;
+                }
+            }
+        });
+        serve_until(config, selected, rx).await
     });
-    if let Err(errors) = &result {
-        for e in errors {
-            tracing::error!(error = %e, "okoala stopped with an error");
+    match &result {
+        Err(errors) => {
+            for e in errors {
+                tracing::error!(error = %e, "okoala stopped with an error");
+            }
         }
-    } else {
-        tracing::info!("okoala stopped");
+        Ok(Stopped::Clean) => tracing::info!("okoala stopped"),
+        Ok(Stopped::Aborted(signal)) => {
+            tracing::warn!(signal = signal.name(), "okoala aborted by a second signal");
+        }
     }
-    // Tasks still running were aborted above; do not wait on blocking threads for long.
+    // Tasks still running were aborted; do not wait on blocking threads for long.
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
 }
 
-/// Like [`run`] without the global setup: runs until `stop` completes (its output names the reason, such as
-/// the signal), then shuts down. The internal listener binds `[internal] listen`.
+/// Like [`run`] without the global setup: runs until the first signal arrives on `stop` (or `stop` is
+/// closed), then shuts down; a second signal on `stop` during shutdown aborts it. The internal listener binds
+/// `[internal] listen`.
 pub async fn serve_until(
     config: Config,
     selected: &[&RoleDescriptor],
-    stop: impl Future<Output = &'static str>,
-) -> Result<(), Vec<ServeError>> {
+    mut stop: mpsc::Receiver<StopSignal>,
+) -> Result<Stopped, Vec<ServeError>> {
     let config = Arc::new(config);
     let ctx = Context {
         config: Arc::clone(&config),
@@ -230,7 +283,10 @@ pub async fn serve_until(
 
     let mut errors = Vec::new();
     tokio::select! {
-        reason = stop => tracing::info!(reason, "shutdown requested"),
+        signal = stop.recv() => tracing::info!(
+            reason = signal.map_or("stop channel closed", StopSignal::name),
+            "shutdown requested"
+        ),
         Some(joined) = tasks.join_next_with_id() => {
             // Before shutdown, a task ending at all is a failure.
             let (name, reason) = describe(&names, joined, "ended before shutdown");
@@ -239,20 +295,35 @@ pub async fn serve_until(
     }
     ctx.readiness.start_shutdown();
     shutdown.cancel();
-    let drained = tokio::time::timeout(SHUTDOWN_DEADLINE, async {
+    let drain = async {
         while let Some(joined) = tasks.join_next_with_id().await {
             if let Some(error) = during_shutdown(&names, joined) {
                 errors.push(error);
             }
         }
-    })
-    .await;
-    if drained.is_err() {
-        tasks.abort_all();
-        errors.push(ServeError::ShutdownDeadline);
+    };
+    let second = async {
+        match stop.recv().await {
+            Some(signal) => signal,
+            // No more signals can come: wait for the drain or the deadline.
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        drained = tokio::time::timeout(SHUTDOWN_DEADLINE, drain) => {
+            if drained.is_err() {
+                tasks.abort_all();
+                errors.push(ServeError::ShutdownDeadline);
+            }
+        }
+        signal = second => {
+            tracing::warn!(signal = signal.name(), "second signal during shutdown; aborting");
+            tasks.abort_all();
+            return Ok(Stopped::Aborted(signal));
+        }
     }
     if errors.is_empty() {
-        Ok(())
+        Ok(Stopped::Clean)
     } else {
         Err(errors)
     }
@@ -285,26 +356,43 @@ fn during_shutdown(
     Some(ServeError::Task { name, reason })
 }
 
-/// Completes with the signal's name on the first SIGTERM or SIGINT. The handlers are installed when this is
-/// called, before the returned future is polled, so a signal that arrives early is not missed.
+/// The process's SIGTERM and SIGINT handlers, installed by [`Signals::new`].
 #[cfg(unix)]
-fn shutdown_signal() -> io::Result<impl Future<Output = &'static str>> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    Ok(async move {
-        tokio::select! {
-            _ = term.recv() => "SIGTERM",
-            _ = int.recv() => "SIGINT",
-        }
-    })
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
 }
 
-/// Not Unix: Ctrl-C only.
+#[cfg(unix)]
+impl Signals {
+    fn new() -> io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    async fn recv(&mut self) -> StopSignal {
+        tokio::select! {
+            _ = self.term.recv() => StopSignal::Term,
+            _ = self.int.recv() => StopSignal::Int,
+        }
+    }
+}
+
+/// Not Unix: Ctrl-C only, reported as SIGINT.
 #[cfg(not(unix))]
-fn shutdown_signal() -> io::Result<impl Future<Output = &'static str>> {
-    Ok(async {
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn new() -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> StopSignal {
         let _ = tokio::signal::ctrl_c().await;
-        "ctrl-c"
-    })
+        StopSignal::Int
+    }
 }

@@ -68,7 +68,9 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Serve(args) => match run_serve(&args) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(serve::Stopped::Clean) => ExitCode::SUCCESS,
+            // A second signal cut the shutdown short: exit as if killed by it, still through main.
+            Ok(serve::Stopped::Aborted(signal)) => ExitCode::from(signal.exit_code()),
             Err(errors) => {
                 for e in errors {
                     eprintln!("okoala: {e}");
@@ -80,7 +82,7 @@ fn main() -> ExitCode {
 }
 
 /// Loads the configuration and selects the roles, reporting the errors of both in one run.
-fn run_serve(args: &ServeArgs) -> Result<(), Vec<serve::ServeError>> {
+fn run_serve(args: &ServeArgs) -> Result<serve::Stopped, Vec<serve::ServeError>> {
     let table = roles::all();
     let config = serve::load(&args.config, &table, &ProcessEnvironment);
     let selected = serve::select(&table, args.roles.as_deref());
@@ -105,5 +107,5 @@ fn run_serve(args: &ServeArgs) -> Result<(), Vec<serve::ServeError>> {
     );
     // `config` (and the secrets in it) is dropped, and zeroized, here.
     drop(config);
-    Ok(())
+    Ok(serve::Stopped::Clean)
 }
