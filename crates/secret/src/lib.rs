@@ -34,6 +34,10 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare(&self, other: &Secret<T>) -> bool {
+        if self.value.as_ref().is_empty() {
+            return false;
+        }
+
         self.value.as_ref().ct_eq(other.value.as_ref()).into()
     }
 
@@ -41,6 +45,10 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare_value(&self, other: &T) -> bool {
+        if self.value.as_ref().is_empty() {
+            return false;
+        }
+
         self.value.as_ref().ct_eq(other.as_ref()).into()
     }
 
@@ -48,6 +56,10 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare_bytes(&self, other: &[u8]) -> bool {
+        if self.value.as_ref().is_empty() {
+            return false;
+        }
+        
         self.value.as_ref().ct_eq(other).into()
     }
 }
