@@ -205,3 +205,41 @@ fn unknown_roles_and_config_errors_are_reported_together() {
     );
     assert!(stderr.contains("unknown role imap"), "{stderr}");
 }
+
+#[test]
+fn check_rejects_a_short_or_malformed_internal_token() {
+    for (name, value) in [
+        ("short", "Abcdefghijklmnopqrstuvwxyz01234"),
+        ("space", "Abcdefghijklmnop qrstuvwxyz0123456789"),
+        ("quote", "Abcdefghijklmnopqrstuvwxyz0123456789\"x"),
+        ("padding", "Abcdefghijklmnopqrstuvwxyz0123456789=x"),
+    ] {
+        let dir = temp_dir(&format!("token-{name}"));
+        let path = dir.join("internal-token");
+        std::fs::write(&path, format!("{value}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        let config = write_config(
+            &dir,
+            &format!(
+                "[internal]\ntoken = {{ secret_file = '{}' }}\n",
+                path.display()
+            ),
+        );
+        let out = okoala(&["serve", "--check", "--config", config.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("[internal] token: invalid value"),
+            "{name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("at least 32 token68 characters"),
+            "{name}: {stderr}"
+        );
+        assert!(!stderr.contains(value), "{name}: {stderr}");
+    }
+}

@@ -19,9 +19,10 @@
 //!
 //! Every secret the helper writes (the internal token and each [`TestConfig::secret_file`]) and every value
 //! passed to [`TestConfig::known_secret`] (a wrong token a test sends, say) is a known secret: a random value
-//! no log could contain by chance. [`OkoalaProcess::stop`] fails the test if any of them, or any
-//! [`WINDOW`]-character piece of one, appears in the captured output, so a truncated or partial leak is caught
-//! too. The process is killed if the test panics first.
+//! no log could contain by chance. [`OkoalaProcess::stop`] (and [`OkoalaProcess::wait`]) fails the test if any
+//! of them appears in the captured output, whole or as a [`WINDOW`]-character piece (so a truncated leak is
+//! caught too), as it is or encoded (see [`leaked_form`]: upper case, hex, base64, percent-encoding, or the
+//! `Debug` of its bytes). The process is killed if the test panics first.
 //!
 //! The real `okoala-testkit` (WP 0.7) takes this over; until then, tests include this module.
 
@@ -168,10 +169,11 @@ impl TestConfig {
             stdout,
             stderr,
             readers,
+            lines,
             secrets: self.secrets,
             token: self.token,
         };
-        process.internal_addr = Some(process.wait_for_listener(&lines));
+        process.internal_addr = Some(process.wait_for_listener());
         process
     }
 }
@@ -207,36 +209,60 @@ pub struct OkoalaProcess {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
+    /// Stdout lines not yet looked at by [`OkoalaProcess::wait_for_log`].
+    lines: Receiver<String>,
     secrets: Vec<String>,
     token: String,
 }
 
 impl OkoalaProcess {
-    fn wait_for_listener(&mut self, lines: &Receiver<String>) -> SocketAddr {
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match lines.recv_timeout(left) {
-                Ok(line) => {
-                    let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    if event["message"] == "internal listener started" {
-                        return event["addr"].as_str().unwrap().parse().unwrap();
-                    }
-                }
-                Err(_) => {
-                    // Exited, or too slow: stop it and show what it said.
-                    let finished = self.finish_with(|child| {
-                        let _ = child.kill();
-                    });
-                    panic!(
-                        "okoala did not start its internal listener ({:?})\nstdout:\n{}\nstderr:\n{}",
-                        finished.status, finished.stdout, finished.stderr
-                    );
-                }
+    fn wait_for_listener(&mut self) -> SocketAddr {
+        match self.next_event("internal listener started", STARTUP_TIMEOUT) {
+            Some(event) => event["addr"].as_str().unwrap().parse().unwrap(),
+            None => {
+                // Exited, or too slow: stop it and show what it said.
+                let finished = self.finish_with(|child| {
+                    let _ = child.kill();
+                });
+                panic!(
+                    "okoala did not start its internal listener ({:?})\nstdout:\n{}\nstderr:\n{}",
+                    finished.status, finished.stdout, finished.stderr
+                );
             }
         }
+    }
+
+    /// The next stdout event with this `message`, skipping the lines before it; `None` after `timeout` or if
+    /// the process closed stdout.
+    fn next_event(&self, message: &str, timeout: Duration) -> Option<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = self.lines.recv_timeout(left).ok()?;
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line)
+                && event["message"] == message
+            {
+                return Some(event);
+            }
+        }
+    }
+
+    /// Waits (up to 30 s) for the next log event with this `message` and returns it.
+    pub fn wait_for_log(&self, message: &str) -> serde_json::Value {
+        self.next_event(message, STARTUP_TIMEOUT)
+            .unwrap_or_else(|| panic!("okoala did not log {message:?}"))
+    }
+
+    /// Sends `signal` and returns at once.
+    pub fn signal(&mut self, signal: Signal) {
+        send(self.child.as_mut().expect("already stopped"), signal);
+    }
+
+    /// Waits for the process to exit (after [`OkoalaProcess::signal`]) and runs the log-scrubbing check.
+    pub fn wait(mut self) -> Finished {
+        let finished = self.finish_with(|_| {});
+        finished.assert_no_known_secret();
+        finished
     }
 
     /// The internal listener's address.
@@ -281,9 +307,8 @@ impl OkoalaProcess {
 
     /// Like [`OkoalaProcess::stop`] with another signal.
     pub fn stop_with_signal(mut self, signal: Signal) -> Finished {
-        let finished = self.finish_with(|child| send(child, signal));
-        finished.assert_no_known_secret();
-        finished
+        self.signal(signal);
+        self.wait()
     }
 
     /// Signals the child (through `stop`), waits for it (killing it after [`STOP_TIMEOUT`]) and for the output.
@@ -331,7 +356,7 @@ pub enum Signal {
 }
 
 #[cfg(unix)]
-fn send(child: &mut Child, signal: Signal) {
+fn send(child: &Child, signal: Signal) {
     use rustix::process::{Pid, Signal as S, kill_process};
     let pid = Pid::from_child(child);
     let signal = match signal {
@@ -355,14 +380,15 @@ pub struct Finished {
 }
 
 impl Finished {
-    /// Fails if a known secret, or any [`WINDOW`]-character piece of one, is in stdout or stderr.
+    /// Fails if a known secret, or a piece of one, is in stdout or stderr, in any of the forms of
+    /// [`leaked_form`].
     pub fn assert_no_known_secret(&self) {
         for (stream, text) in [("stdout", &self.stdout), ("stderr", &self.stderr)] {
             for secret in &self.secrets {
-                if let Some(piece) = leaked_piece(secret, text) {
+                if let Some((form, piece)) = leaked_form(secret, text) {
                     panic!(
-                        "a known test secret leaked to {stream} (the piece {piece:?} of a {}-character \
-                         secret)\n{stream}:\n{text}",
+                        "a known test secret leaked to {stream} ({form}: the piece {piece:?} of a \
+                         {}-character secret)\n{stream}:\n{text}",
                         secret.len()
                     );
                 }
@@ -392,6 +418,62 @@ pub fn leaked_piece<'s>(secret: &'s str, text: &str) -> Option<&'s str> {
     (0..=secret.len() - WINDOW)
         .filter_map(|i| secret.get(i..i + WINDOW))
         .find(|piece| text.contains(piece))
+}
+
+/// The forms of `secret` searched for: as it is, upper-cased, the hex of its bytes (lower and upper case),
+/// standard and URL-safe base64, percent-encoded (every byte, lower and upper case), and runs of
+/// [`BYTE_RUN`] values of the `Debug` of its bytes (`[54, 102, ...]`).
+pub fn encoded_forms(secret: &str) -> Vec<(&'static str, String)> {
+    let bytes = secret.as_bytes();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let percent: String = bytes.iter().map(|b| format!("%{b:02X}")).collect();
+    vec![
+        ("as is", secret.to_owned()),
+        ("upper case", secret.to_uppercase()),
+        ("hex", hex.clone()),
+        ("upper-case hex", hex.to_uppercase()),
+        ("base64", base64(bytes, STANDARD)),
+        ("URL-safe base64", base64(bytes, URL_SAFE)),
+        ("percent-encoded", percent.clone()),
+        ("percent-encoded, lower case", percent.to_lowercase()),
+    ]
+}
+
+/// The length of the runs of byte values searched for in `Debug` output.
+pub const BYTE_RUN: usize = 8;
+
+/// The first form and piece of `secret` found in `text`: a [`WINDOW`]-character piece of one of the
+/// [`encoded_forms`], or [`BYTE_RUN`] consecutive byte values as `Debug` prints them.
+pub fn leaked_form(secret: &str, text: &str) -> Option<(&'static str, String)> {
+    for (form, encoded) in encoded_forms(secret) {
+        if let Some(piece) = leaked_piece(&encoded, text) {
+            return Some((form, piece.to_owned()));
+        }
+    }
+    let values: Vec<String> = secret.bytes().map(|b| b.to_string()).collect();
+    values
+        .windows(BYTE_RUN.min(values.len()))
+        .map(|run| run.join(", "))
+        .find(|run| text.contains(run.as_str()))
+        .map(|run| ("Debug of the bytes", run))
+}
+
+const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Base64 without padding (a piece of the encoding is searched for, so padding does not matter).
+fn base64(bytes: &[u8], alphabet: &[u8; 64]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(char::from(alphabet[(n >> (18 - 6 * i)) as usize & 63]));
+        }
+    }
+    out
 }
 
 /// The status code of a raw HTTP response, or 0 if there is none.
