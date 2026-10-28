@@ -17,7 +17,7 @@ pub struct Secret<T: Zeroize> {
     value: T,
 }
 
-impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
+impl<T: Zeroize> Secret<T> {
     /// Creates a new Secret
     pub fn new(value: T) -> Self {
         Self { value }
@@ -27,14 +27,16 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
     pub fn reveal_value(&self) -> &T {
         &self.value
     }
+}
 
-    /// Constant time compare between Secret<T>s
+impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
+    /// Constant time compare between `Secret<T>`s
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     pub fn compare(&self, other: Secret<T>) -> bool {
         self.value.as_ref().ct_eq(other.value.as_ref()).into()
     }
 
-    /// Constant time compare between Secret<T>s
+    /// Constant time compare between `Secret<T>` and `T`
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     pub fn compare_value(&self, other: T) -> bool {
         self.value.as_ref().ct_eq(other.as_ref()).into()
