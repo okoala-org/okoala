@@ -26,10 +26,11 @@ enum Command {
     /// Load and validate the configuration, then run the selected roles.
     #[command(
         long_about = "Load and validate the configuration, then run the selected roles.\n\n\
-        This build has no roles yet: `serve` loads and validates the configuration, reports every \
-        error, and exits (0 if the configuration is valid). Values come from the TOML file and from \
-        OKOALA_<SECTION>__<KEY> environment variables; secrets are read from the files or variables the \
-        configuration names."
+        Values come from the TOML file and from OKOALA_<SECTION>__<KEY> environment variables; secrets \
+        are read from the files or variables the configuration names. Every configuration error is \
+        reported. The process then logs JSON lines to stdout, serves the internal listener \
+        ([internal] listen: /healthz, /readyz, /metrics, /internal/v1/*), and runs until SIGTERM or \
+        SIGINT, when it shuts down gracefully and exits 0. This build has no roles yet."
     )]
     Serve(ServeArgs),
 }
@@ -67,7 +68,9 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Serve(args) => match run_serve(&args) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(serve::Stopped::Clean) => ExitCode::SUCCESS,
+            // A second signal cut the shutdown short: exit as if killed by it, still through main.
+            Ok(serve::Stopped::Aborted(signal)) => ExitCode::from(signal.exit_code()),
             Err(errors) => {
                 for e in errors {
                     eprintln!("okoala: {e}");
@@ -79,7 +82,7 @@ fn main() -> ExitCode {
 }
 
 /// Loads the configuration and selects the roles, reporting the errors of both in one run.
-fn run_serve(args: &ServeArgs) -> Result<(), Vec<serve::ServeError>> {
+fn run_serve(args: &ServeArgs) -> Result<serve::Stopped, Vec<serve::ServeError>> {
     let table = roles::all();
     let config = serve::load(&args.config, &table, &ProcessEnvironment);
     let selected = serve::select(&table, args.roles.as_deref());
@@ -92,20 +95,17 @@ fn run_serve(args: &ServeArgs) -> Result<(), Vec<serve::ServeError>> {
                 .collect());
         }
     };
+    if !args.check {
+        // Logs go to stdout as JSON from here on, so nothing else is printed there.
+        return serve::run(config, &selected);
+    }
     let sections: Vec<_> = config.section_names().collect();
     println!(
         "configuration {} is valid (sections: {})",
         args.config.display(),
         sections.join(", ")
     );
-    if !args.check {
-        // No role crate exists yet, so nothing runs; running `selected` comes with the first one.
-        println!(
-            "no role can run yet in this build ({} selected); exiting",
-            selected.len()
-        );
-    }
     // `config` (and the secrets in it) is dropped, and zeroized, here.
     drop(config);
-    Ok(())
+    Ok(serve::Stopped::Clean)
 }

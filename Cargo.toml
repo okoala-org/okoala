@@ -14,11 +14,23 @@ publish = false
 okoala-core   = { path = "crates/core" }
 okoala-secret = { path = "crates/secret" }
 okoala-config = { path = "crates/config" }
+okoala-telemetry = { path = "crates/telemetry" }
+okoala-internal-api = { path = "crates/internal-api" }
 zeroize = { version = "1.9.1" }
 subtle = { version = "2.6.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = { version = "0.9.12", default-features = false, features = ["std", "parse", "serde"] }
 rustix = { version = "1.1.6", default-features = false, features = ["std"] }
+tokio = { version = "1.54.1", default-features = false }
+tokio-util = { version = "0.7.20", default-features = false }
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["http1", "server", "server-graceful", "tokio"] }
+http-body-util = { version = "0.1.5" }
+bytes = { version = "1.12.1" }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "json", "env-filter"] }
+prometheus-client = { version = "0.25.1", default-features = false }
+serde_json = { version = "1.0.154" }
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 
 [workspace.lints.rust]
