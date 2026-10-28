@@ -9,7 +9,6 @@ use std::fmt;
 use std::panic;
 
 use okoala_secret::Secret;
-use zeroize::Zeroize;
 
 const PASSWORD: &str = "hunter2-correct-horse-battery-staple";
 
@@ -111,21 +110,17 @@ fn byte_secrets_are_hidden_too() {
     assert!(!output.contains("7, 7"), "array leaked: {output}");
 }
 
-/// A type that implements `Zeroize` but not `Debug`. `Secret<T>`'s `Debug` must not need
-/// `T: Debug`; if it did, this would not compile.
-struct NoDebug(Vec<u8>);
-
-impl Zeroize for NoDebug {
-    fn zeroize(&mut self) {
-        self.0.zeroize();
-    }
-}
-
 #[test]
-fn debug_does_not_require_the_inner_type_to_be_debug() {
-    let secret = Secret::new(NoDebug(PASSWORD.as_bytes().to_vec()));
-    let output = format!("{secret:?}");
-    assert!(output.contains("[REDACTED]"));
+fn every_allowed_value_type_is_redacted() {
+    let outputs = [
+        format!("{:?}", Secret::new(String::from(PASSWORD))),
+        format!("{:?}", Secret::new(Box::<str>::from(PASSWORD))),
+        format!("{:?}", Secret::new(PASSWORD.as_bytes().to_vec())),
+        format!("{:?}", Secret::new(Box::<[u8]>::from(PASSWORD.as_bytes()))),
+    ];
+    for output in outputs {
+        assert_redacted(&output);
+    }
 }
 
 #[derive(Debug)]

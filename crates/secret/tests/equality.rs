@@ -31,7 +31,38 @@ fn same(left: &str, right: &str) -> bool {
 #[test]
 fn equal_values_are_equal() {
     assert!(same("token-123", "token-123"));
-    assert!(same("", ""));
+}
+
+/// Review finding 1: a credential that is unset (an empty string from a missing setting
+/// or `unwrap_or_default()`) must not let an empty token in.
+#[test]
+fn an_empty_secret_matches_nothing() {
+    for stored in [s(""), Secret::new(String::new())] {
+        assert!(!stored.compare(&s("")), "empty against empty secret");
+        assert!(
+            !stored.compare_value(&String::new()),
+            "empty against empty value"
+        );
+        assert!(!stored.compare_bytes(b""), "empty against empty bytes");
+        assert!(!stored.compare_bytes(b"x"));
+        assert!(!stored.compare(&s("token-123")));
+    }
+    let empty_bytes = Secret::new(Vec::<u8>::new());
+    assert!(!empty_bytes.compare(&Secret::new(Vec::new())));
+    assert!(!empty_bytes.compare_value(&Vec::new()));
+    assert!(!empty_bytes.compare_bytes(&[]));
+    assert!(!Secret::new(Box::<[u8]>::from(&[][..])).compare_bytes(&[]));
+    assert!(!Secret::new([0u8; 0]).compare_bytes(&[]));
+}
+
+#[test]
+fn an_empty_bearer_token_is_rejected() {
+    let unset = Secret::new(std::env::var("OKOALA_TEST_UNSET_SECRET").unwrap_or_default());
+    let header = "Bearer ";
+    let presented = header.strip_prefix("Bearer ").unwrap_or_default();
+    assert!(presented.is_empty());
+    assert!(!unset.compare_bytes(presented.as_bytes()));
+    assert!(!s("token-123").compare_bytes(presented.as_bytes()));
 }
 
 #[test]
@@ -106,12 +137,10 @@ fn byte_secrets_compare_correctly() {
     assert!(!a.compare(&Secret::new(vec![1u8, 2])));
     assert!(a.compare_value(&vec![1u8, 2, 3]));
     assert!(!a.compare_value(&vec![1u8, 2, 3, 4]));
-    assert!(Secret::new(Vec::<u8>::new()).compare_value(&Vec::new()));
     assert!(a.compare_bytes(&[1, 2, 3]));
     assert!(!a.compare_bytes(&[1, 2, 4]));
     assert!(!a.compare_bytes(&[1, 2]));
     assert!(!a.compare_bytes(&[]));
-    assert!(Secret::new(Vec::<u8>::new()).compare_bytes(&[]));
 }
 
 /// The case `compare_bytes` exists for: a token from a request arrives borrowed (`&str`,
@@ -154,8 +183,9 @@ fn fixed_size_keys_compare_correctly() {
     assert!(!key.compare(&Secret::new(other)));
 }
 
-/// Compares every pair from a set of tricky inputs against plain byte equality, through
-/// all three methods and for `String` and `Vec<u8>` values.
+/// Compares every pair from a set of tricky inputs against plain byte equality (an empty
+/// stored secret never matches), through all three methods and for `String` and `Vec<u8>`
+/// values.
 #[test]
 fn every_form_agrees_with_plain_byte_equality() {
     let inputs = [
@@ -178,7 +208,8 @@ fn every_form_agrees_with_plain_byte_equality() {
     ];
     for left in inputs {
         for right in inputs {
-            let expected = left.as_bytes() == right.as_bytes();
+            // An empty stored secret never matches (review finding 1).
+            let expected = !left.is_empty() && left.as_bytes() == right.as_bytes();
             assert_eq!(same(left, right), expected, "String: {left:?} {right:?}");
 
             let bytes = Secret::new(left.as_bytes().to_vec());

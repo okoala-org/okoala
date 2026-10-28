@@ -11,7 +11,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 
-use okoala_secret::Secret;
+use okoala_secret::{Secret, ValidSecretT};
 
 /// Fails to compile if `$ty` implements `$tr`: with the impl, the call below has two
 /// candidate impls and type inference cannot choose between them.
@@ -61,6 +61,29 @@ assert_not_impl!(Secret<String>: Borrow<String>);
 // No implicit conversion into a secret (the copy from `&str` was removed on purpose).
 assert_not_impl!(Secret<String>: From<&'static str>);
 
+// Review finding 2: only a closed set of value types can be secrets, so no outside type
+// can bring a misbehaving `AsRef` or `Zeroize`.
+assert_not_impl!(u64: ValidSecretT);
+assert_not_impl!(char: ValidSecretT);
+assert_not_impl!(Vec<u16>: ValidSecretT);
+assert_not_impl!(Vec<char>: ValidSecretT);
+assert_not_impl!(Box<String>: ValidSecretT);
+assert_not_impl!(Option<String>: ValidSecretT);
+assert_not_impl!([u16; 4]: ValidSecretT);
+
+fn assert_valid<T: ValidSecretT>() {}
+
+/// The value types `Secret` is meant for.
+#[test]
+fn allowed_value_types() {
+    assert_valid::<String>();
+    assert_valid::<Box<str>>();
+    assert_valid::<Vec<u8>>();
+    assert_valid::<Box<[u8]>>();
+    assert_valid::<[u8; 0]>();
+    assert_valid::<[u8; 32]>();
+}
+
 fn assert_send_sync<T: Send + Sync>() {}
 
 /// Secrets are held in shared configuration and moved across async tasks, so they must
@@ -70,4 +93,6 @@ fn secrets_are_send_and_sync() {
     assert_send_sync::<Secret<String>>();
     assert_send_sync::<Secret<Vec<u8>>>();
     assert_send_sync::<Secret<[u8; 32]>>();
+    assert_send_sync::<Secret<Box<str>>>();
+    assert_send_sync::<Secret<Box<[u8]>>>();
 }
