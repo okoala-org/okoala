@@ -9,15 +9,36 @@
 //! responsibility lies with the users of this crate.
 
 use std::fmt;
-use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
+use subtle::ConstantTimeEq;
+
+mod __internal {
+    pub trait Sealed {}
+}
+
+pub trait ValidSecretT: __internal::Sealed + Zeroize {}
+
+impl __internal::Sealed for String {}
+impl ValidSecretT for String {}
+
+impl __internal::Sealed for Vec<u8> {}
+impl ValidSecretT for Vec<u8> {}
+
+impl __internal::Sealed for Box<[u8]> {}
+impl ValidSecretT for Box<[u8]> {}
+
+impl __internal::Sealed for Box<str> {}
+impl ValidSecretT for Box<str> {}
+
+impl<const N: usize> __internal::Sealed for [u8; N] {}
+impl<const N: usize> ValidSecretT for [u8; N] {}
 
 /// Holds a secret value and helps prevent it from being accidentally exposed
-pub struct Secret<T: Zeroize> {
+pub struct Secret<T: ValidSecretT> {
     value: T,
 }
 
-impl<T: Zeroize> Secret<T> {
+impl<T: ValidSecretT> Secret<T> {
     /// Creates a new Secret
     pub fn new(value: T) -> Self {
         Self { value }
@@ -29,7 +50,7 @@ impl<T: Zeroize> Secret<T> {
     }
 }
 
-impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
+impl<T: ValidSecretT + AsRef<[u8]>> Secret<T> {
     /// Constant time compare between `Secret<T>`s
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
@@ -65,7 +86,7 @@ impl<T: Zeroize + AsRef<[u8]>> Secret<T> {
 }
 
 // Debug impl that redacts secret value
-impl<T: Zeroize> fmt::Debug for Secret<T> {
+impl<T: ValidSecretT> fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Secret")
             .field("value", &"[REDACTED]")
@@ -74,7 +95,7 @@ impl<T: Zeroize> fmt::Debug for Secret<T> {
 }
 
 // Zero the value memory on drop
-impl<T: Zeroize> Drop for Secret<T> {
+impl<T: ValidSecretT> Drop for Secret<T> {
     fn drop(&mut self) {
         self.value.zeroize();
     }
