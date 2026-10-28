@@ -9,6 +9,7 @@
 //! responsibility lies with the users of this crate.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
@@ -53,3 +54,9 @@ impl<T: Zeroize + AsRef<[u8]>> PartialEq for Secret<T> {
 }
 
 impl<T: Zeroize + AsRef<[u8]>> Eq for Secret<T> {}
+
+impl<T: Zeroize + Hash> Hash for Secret<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
