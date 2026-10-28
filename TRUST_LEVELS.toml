@@ -1,4 +1,25 @@
-# Paths written strictly by hand by IASoft engineers
+# Trust levels: who writes each path, and how it is reviewed (see "Use of AI in this project" in README.md).
+#
+# Each entry is a path prefix; `*` matches exactly one path component. A file belongs to the level of its longest
+# matching entry. Files that match no entry are T1.
+
+# T0: written strictly by hand by IASoft engineers; reviewed by AI agents briefed as attackers, then by the engineers.
+# Commits touching these paths never carry an AI co-author trailer.
 t0 = [
   "crates/secret/src/",
+]
+
+# T1: production code written by AI agents and reviewed by IASoft engineers before it is published, by risk tier.
+t1 = [
+  "crates/",
+]
+
+# T2: tests, benchmarks, build and CI tooling, written by AI agents and reviewed lightly by IASoft engineers. This
+# includes the tests of T0 crates.
+t2 = [
+  "crates/*/tests/",
+  "crates/*/benches/",
+  "xtask/",
+  ".github/",
+  ".cargo/",
 ]

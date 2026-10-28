@@ -13,6 +13,23 @@
 
 ## Overview
 
+OKoala is a self-hosted, multi-tenant server for email, calendars, contacts and chat, with its own web client. It speaks
+open standards, so the mail and calendar apps people already use keep working:
+
+- **Email**: SMTP for receiving and sending (with DKIM, SPF and DMARC), JMAP for Mail, and IMAP4rev2.
+- **Calendars and contacts**: JMAP for Calendars and Contacts, CalDAV and CardDAV, and meeting invitations across
+  servers (iTIP and iMIP).
+- **Chat**: Matrix, with a separate homeserver for each tenant, single sign-on and federation.
+- **Web client**: mail, calendars, contacts and chat in the browser, with Web Push notifications.
+
+Each tenant's data is kept apart from the others', and so is its share of the server's capacity: one tenant cannot
+slow down another's mail or calendars. OKoala stores its data in PostgreSQL and S3-compatible object storage. It is
+deployed with a Helm chart on Kubernetes; a single server runs the same chart on a one-machine k3s cluster, set up by
+the `okoalactl` installer.
+
+**Status**: early development. The list above is what version 1 will provide; most of it is not built yet, and nothing
+here is ready for use.
+
 ## License
 
 Copyright © 2026 IASoft (PVT) LTD.
