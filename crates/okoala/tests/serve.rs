@@ -62,7 +62,7 @@ fn check_accepts_a_valid_config() {
     );
     let out = okoala(&["serve", "--check", "--config", config.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("is valid (sections: internal)"));
+    assert!(text(&out.stdout).contains("is valid (sections: internal, telemetry)"));
     assert!(!text(&out.stdout).contains(TEST_SECRET));
 }
 
@@ -119,19 +119,44 @@ fn environment_overrides_reach_the_process() {
 }
 
 #[test]
-fn serve_without_roles_validates_and_exits() {
-    let dir = temp_dir("serve");
+fn serve_fails_when_the_internal_listener_cannot_bind() {
+    let dir = temp_dir("bind");
     let secret = write_secret(&dir, 0o400);
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let config = write_config(
         &dir,
         &format!(
-            "[internal]\ntoken = {{ secret_file = '{}' }}\n",
+            "[internal]\nlisten = \"{}\"\ntoken = {{ secret_file = '{}' }}\n",
+            taken.local_addr().unwrap(),
             secret.display()
         ),
     );
     let out = okoala(&["serve", "--config", config.to_str().unwrap()]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("no role can run yet"));
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("internal listener: cannot listen on"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(TEST_SECRET) && !text(&out.stdout).contains(TEST_SECRET));
+}
+
+#[test]
+fn check_rejects_an_invalid_log_filter() {
+    let dir = temp_dir("filter");
+    let secret = write_secret(&dir, 0o400);
+    let config = write_config(
+        &dir,
+        &format!(
+            "[internal]\ntoken = {{ secret_file = '{}' }}\n[telemetry]\nfilter = \"okoala=loud\"\n",
+            secret.display()
+        ),
+    );
+    let out = okoala(&["serve", "--check", "--config", config.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("[telemetry] filter:"), "{stderr}");
+    assert!(!stderr.contains("loud"), "{stderr}");
 }
 
 #[test]
