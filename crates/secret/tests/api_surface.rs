@@ -96,3 +96,27 @@ fn secrets_are_send_and_sync() {
     assert_send_sync::<Secret<Box<str>>>();
     assert_send_sync::<Secret<Box<[u8]>>>();
 }
+
+/// Review finding 3: `reveal_value()` hands out a borrowed `str` or `[u8]` view, never
+/// `&T`, so `*secret.reveal_value()` cannot silently copy a key (unsized values cannot
+/// be moved out). These bindings only compile with exactly these view types.
+#[test]
+fn reveal_value_returns_borrowed_views() {
+    let text = Secret::new(String::from("password"));
+    let boxed_text = Secret::new(Box::<str>::from("password"));
+    let bytes = Secret::new(b"password".to_vec());
+    let boxed_bytes = Secret::new(Box::<[u8]>::from(&b"password"[..]));
+    let key = Secret::new([7u8; 32]);
+
+    let text_view: &str = text.reveal_value();
+    let boxed_text_view: &str = boxed_text.reveal_value();
+    let bytes_view: &[u8] = bytes.reveal_value();
+    let boxed_bytes_view: &[u8] = boxed_bytes.reveal_value();
+    let key_view: &[u8] = key.reveal_value();
+
+    assert_eq!(text_view, "password");
+    assert_eq!(boxed_text_view, "password");
+    assert_eq!(bytes_view, b"password");
+    assert_eq!(boxed_bytes_view, b"password");
+    assert_eq!(key_view, [7u8; 32]);
+}
