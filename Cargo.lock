@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "okoala"
 version = "0.1.0"
+dependencies = [
+ "okoala-secret",
+]
 
 [[package]]
 name = "okoala-config"
@@ -17,7 +20,16 @@ version = "0.1.0"
 [[package]]
 name = "okoala-secret"
 version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "xtask"
 version = "0.1.0"
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
