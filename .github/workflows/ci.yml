@@ -58,22 +58,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: SPDX headers
         run: cargo xtask check-spdx
+      # The whole history, so a first push, a force-push or a cancelled earlier run cannot leave
+      # commits unchecked.
       - name: Trust levels
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
-          PUSH_SHA: ${{ github.sha }}
-        run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            range="$BASE_SHA..$HEAD_SHA"
-          elif [ -n "$BEFORE_SHA" ] && ! echo "$BEFORE_SHA" | grep -qE '^0+$' && git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
-            range="$BEFORE_SHA..$PUSH_SHA"
-          else
-            range="$PUSH_SHA"
-          fi
-          cargo xtask check-trust "$range"
+        run: cargo xtask check-trust --all
 
   # Licences, banned crates (openssl, native-tls), sources and RustSec advisories (deny.toml).
   deny:

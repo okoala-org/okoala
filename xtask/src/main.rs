@@ -15,7 +15,8 @@ const USAGE: &str = "usage: cargo xtask <command>
 commands:
   check-spdx                  every tracked .rs file has the copyright + SPDX header
   check-trust [RANGE]         no AI co-author trailer on commits touching T0 paths, and the lint policy
-                              RANGE is a git range such as origin/main..HEAD, or a single commit;
+                              RANGE is a git range such as origin/main..HEAD, a single commit, or --all
+                              (every commit reachable from HEAD; used in CI);
                               default: origin/main..HEAD, or only HEAD when origin/main does not exist
   levels PATH...              print the trust level of each path (see TRUST_LEVELS.toml)";
 

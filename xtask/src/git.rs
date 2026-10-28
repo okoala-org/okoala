@@ -48,9 +48,12 @@ pub fn ref_exists(root: &Path, rev: &str) -> bool {
     .is_ok()
 }
 
-/// Commits of `range`. A range without `..` names a single commit.
+/// Commits of `range`. `--all` means every commit reachable from HEAD; a range without `..` names a
+/// single commit.
 pub fn commits(root: &Path, range: &str) -> Result<Vec<String>, String> {
-    let out = if range.contains("..") {
+    let out = if range == "--all" {
+        git(root, &["rev-list", "HEAD"])?
+    } else if range.contains("..") {
         git(root, &["rev-list", range])?
     } else {
         git(root, &["rev-list", "-1", range])?
@@ -62,21 +65,35 @@ pub fn message(root: &Path, hash: &str) -> Result<String, String> {
     git(root, &["show", "-s", "--format=%B", hash])
 }
 
-/// Paths a commit touches (for merges, against every parent).
+/// Author and committer as `Name <email>` lines.
+pub fn identities(root: &Path, hash: &str) -> Result<Vec<String>, String> {
+    let out = git(root, &["show", "-s", "--format=%an <%ae>%n%cn <%ce>", hash])?;
+    Ok(out.lines().map(str::to_owned).collect())
+}
+
+/// Paths a commit touches. For a merge: against its first parent only, because the commits of the
+/// merged branch are checked individually.
 pub fn changed_paths(root: &Path, hash: &str) -> Result<Vec<String>, String> {
-    let out = git(
-        root,
-        &[
-            "diff-tree",
-            "--no-commit-id",
-            "--name-only",
-            "-r",
-            "-m",
-            "--root",
-            "-z",
-            hash,
-        ],
-    )?;
+    let parents = git(root, &["rev-list", "--parents", "-n", "1", hash])?;
+    let out = if parents.split_whitespace().count() > 2 {
+        git(
+            root,
+            &["diff", "--name-only", "-z", &format!("{hash}^1"), hash],
+        )?
+    } else {
+        git(
+            root,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "--root",
+                "-z",
+                hash,
+            ],
+        )?
+    };
     Ok(out
         .split('\0')
         .filter(|s| !s.is_empty())
