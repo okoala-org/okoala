@@ -2,3 +2,9 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-dbg-in-tests = true
+
+# Calls that skip destructors, so any `Secret` they hold would not be zeroized on drop.
+disallowed-methods = [
+  { path = "std::process::exit", reason = "skips destructors, so secrets are not zeroized; return from main instead" },
+  { path = "std::boxed::Box::leak", reason = "the leaked value is never dropped, so secrets in it are not zeroized" },
+]
