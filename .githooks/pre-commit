@@ -1,0 +1,63 @@
+#!/bin/sh
+# Runs `cargo fmt` before every commit and re-stages the staged files it reformatted.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Skip for one commit:     git commit --no-verify
+#
+# A staged file that also has unstaged changes cannot be reformatted and re-staged without
+# staging those changes too, so the commit stops instead. Files that are not part of the
+# commit are left reformatted in the working tree.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+# Rust files with unstaged changes before formatting, with their contents' hashes, so we
+# can tell afterwards which of them rustfmt touched.
+before=$(git diff --name-only -- '*.rs' | while read -r f; do
+    [ -f "$f" ] && printf '%s %s\n' "$(git hash-object -- "$f")" "$f"
+done)
+
+if ! cargo fmt --all; then
+    echo "pre-commit: cargo fmt failed; commit stopped." >&2
+    exit 1
+fi
+
+restage=""
+partial=""
+others=""
+for f in $(git diff --name-only -- '*.rs'); do
+    old=$(printf '%s\n' "$before" | awk -v f="$f" '$2 == f { print $1 }')
+    if [ -n "$old" ] && [ "$old" = "$(git hash-object -- "$f")" ]; then
+        continue # unstaged before, and rustfmt did not change it
+    fi
+    if printf '%s\n' "$staged" | grep -qxF -- "$f"; then
+        if [ -n "$old" ]; then
+            partial="$partial $f"
+        else
+            restage="$restage $f"
+        fi
+    else
+        others="$others $f"
+    fi
+done
+
+if [ -n "$partial" ]; then
+    echo "pre-commit: cargo fmt changed these files, which also have unstaged changes:" >&2
+    for f in $partial; do echo "  $f" >&2; done
+    echo "Review the formatting, stage what you want, and commit again." >&2
+    exit 1
+fi
+
+for f in $restage; do
+    git add -- "$f"
+    echo "pre-commit: formatted and re-staged $f"
+done
+
+for f in $others; do
+    echo "pre-commit: formatted $f (not part of this commit; left unstaged)"
+done
