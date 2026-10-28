@@ -231,3 +231,57 @@ fn every_form_agrees_with_plain_byte_equality() {
         }
     }
 }
+
+/// Every allowed value type can be compared, and its comparisons agree with the `String`
+/// ones (review finding 2 follow-up: `Box<str>` could not be compared before).
+#[test]
+fn every_allowed_value_type_compares_like_string() {
+    let inputs = ["", "a", "token-123", "token-124", "token-12", "caf\u{e9}"];
+    for left in inputs {
+        for right in inputs {
+            let expected = same(left, right);
+
+            let boxed_text = Secret::new(Box::<str>::from(left));
+            assert_eq!(
+                boxed_text.compare(&Secret::new(Box::<str>::from(right))),
+                expected,
+                "Box<str> compare: {left:?} {right:?}"
+            );
+            assert_eq!(
+                boxed_text.compare_value(&Box::<str>::from(right)),
+                expected,
+                "Box<str> compare_value: {left:?} {right:?}"
+            );
+            assert_eq!(
+                boxed_text.compare_bytes(right.as_bytes()),
+                expected,
+                "Box<str> compare_bytes: {left:?} {right:?}"
+            );
+
+            let boxed_bytes = Secret::new(Box::<[u8]>::from(left.as_bytes()));
+            assert_eq!(
+                boxed_bytes.compare(&Secret::new(Box::<[u8]>::from(right.as_bytes()))),
+                expected,
+                "Box<[u8]> compare: {left:?} {right:?}"
+            );
+            assert_eq!(
+                boxed_bytes.compare_value(&Box::<[u8]>::from(right.as_bytes())),
+                expected,
+                "Box<[u8]> compare_value: {left:?} {right:?}"
+            );
+            assert_eq!(
+                boxed_bytes.compare_bytes(right.as_bytes()),
+                expected,
+                "Box<[u8]> compare_bytes: {left:?} {right:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_key_array_matches_nothing() {
+    let empty = Secret::new([0u8; 0]);
+    assert!(!empty.compare(&Secret::new([0u8; 0])));
+    assert!(!empty.compare_value(&[0u8; 0]));
+    assert!(!empty.compare_bytes(&[]));
+}
