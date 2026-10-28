@@ -1,9 +1,9 @@
 // Copyright (C) 2026 IASoft PVT LTD
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `Secret::compare` and `Secret::compare_value` must give the same answers as comparing
-//! the bytes directly. These tests check correctness only; they cannot show that the
-//! comparison takes constant time.
+//! `Secret::compare`, `Secret::compare_value` and `Secret::compare_bytes` must give the
+//! same answers as comparing the bytes directly. These tests check correctness only; they
+//! cannot show that the comparison takes constant time.
 
 use okoala_secret::Secret;
 
@@ -11,13 +11,19 @@ fn s(value: &str) -> Secret<String> {
     Secret::new(String::from(value))
 }
 
-/// Compares through both methods and checks that they agree.
+/// Compares through all three methods and checks that they agree.
 fn same(left: &str, right: &str) -> bool {
-    let by_secret = s(left).compare(&s(right));
-    let by_value = s(left).compare_value(&String::from(right));
+    let secret = s(left);
+    let by_secret = secret.compare(&s(right));
+    let by_value = secret.compare_value(&String::from(right));
+    let by_bytes = secret.compare_bytes(right.as_bytes());
     assert_eq!(
         by_secret, by_value,
         "compare and compare_value disagree: {left:?} {right:?}"
+    );
+    assert_eq!(
+        by_secret, by_bytes,
+        "compare and compare_bytes disagree: {left:?} {right:?}"
     );
     by_secret
 }
@@ -101,6 +107,38 @@ fn byte_secrets_compare_correctly() {
     assert!(a.compare_value(&vec![1u8, 2, 3]));
     assert!(!a.compare_value(&vec![1u8, 2, 3, 4]));
     assert!(Secret::new(Vec::<u8>::new()).compare_value(&Vec::new()));
+    assert!(a.compare_bytes(&[1, 2, 3]));
+    assert!(!a.compare_bytes(&[1, 2, 4]));
+    assert!(!a.compare_bytes(&[1, 2]));
+    assert!(!a.compare_bytes(&[]));
+    assert!(Secret::new(Vec::<u8>::new()).compare_bytes(&[]));
+}
+
+/// The case `compare_bytes` exists for: a token from a request arrives borrowed (`&str`,
+/// a slice of a header or a buffer) and is checked without copying it into an owned
+/// value that would never be zeroized.
+#[test]
+fn compare_bytes_checks_borrowed_input_without_copying() {
+    let stored = s("token-123");
+    let header = "Bearer token-123";
+    let presented: &str = header.strip_prefix("Bearer ").unwrap_or_default();
+    assert!(stored.compare_bytes(presented.as_bytes()));
+    assert!(!stored.compare_bytes(&header.as_bytes()[..9]));
+    assert!(!stored.compare_bytes(header.as_bytes()));
+
+    let buffer: [u8; 12] = *b"token-123xyz";
+    assert!(stored.compare_bytes(&buffer[..9]));
+    assert!(!stored.compare_bytes(&buffer[..10]));
+    assert!(!stored.compare_bytes(&buffer));
+}
+
+#[test]
+fn compare_bytes_compares_text_secrets_with_bytes_and_byte_secrets_with_text() {
+    assert!(s("abc").compare_bytes(b"abc"));
+    assert!(!s("abc").compare_bytes(b"ABC"));
+    assert!(Secret::new(b"abc".to_vec()).compare_bytes("abc".as_bytes()));
+    assert!(Secret::new([0u8; 4]).compare_bytes(&[0, 0, 0, 0]));
+    assert!(!Secret::new([0u8; 4]).compare_bytes(&[0, 0, 0]));
 }
 
 #[test]
@@ -117,7 +155,7 @@ fn fixed_size_keys_compare_correctly() {
 }
 
 /// Compares every pair from a set of tricky inputs against plain byte equality, through
-/// both methods and for `String` and `Vec<u8>` values.
+/// all three methods and for `String` and `Vec<u8>` values.
 #[test]
 fn every_form_agrees_with_plain_byte_equality() {
     let inputs = [
@@ -153,6 +191,11 @@ fn every_form_agrees_with_plain_byte_equality() {
                 bytes.compare_value(&right.as_bytes().to_vec()),
                 expected,
                 "Vec<u8> compare_value: {left:?} {right:?}"
+            );
+            assert_eq!(
+                bytes.compare_bytes(right.as_bytes()),
+                expected,
+                "Vec<u8> compare_bytes: {left:?} {right:?}"
             );
         }
     }
