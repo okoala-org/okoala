@@ -15,7 +15,7 @@ okoala-core   = { path = "crates/core" }
 okoala-secret = { path = "crates/secret" }
 okoala-config = { path = "crates/config" }
 zeroize = { version = "1.9.1" }
-subtle = { version = "2.5" }
+subtle = { version = "2.6.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
