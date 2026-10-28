@@ -23,6 +23,9 @@ use crate::readiness::Readiness;
 /// The prefix of the authenticated routes.
 const INTERNAL_PREFIX: &str = "/internal/v1";
 
+/// The most bytes of a path logged (paths outside `/internal/v1/`).
+const MAX_LOGGED_PATH: usize = 128;
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
     route: &'static str,
@@ -36,6 +39,7 @@ pub struct InternalApi {
     metrics: Arc<Metrics>,
     readiness: Arc<Readiness>,
     requests: Family<RequestLabels, Counter>,
+    rejected: Counter,
 }
 
 impl fmt::Debug for InternalApi {
@@ -48,7 +52,8 @@ impl fmt::Debug for InternalApi {
 
 impl InternalApi {
     /// The handler for a process whose configuration is `config` (its `[internal]` section holds the token).
-    /// Registers `okoala_internal_requests_total{route, status}` in `metrics`.
+    /// Registers `okoala_internal_requests_total{route, status}` and `okoala_internal_connections_rejected_total`
+    /// in `metrics`.
     ///
     /// If `config` has no `[internal]` section (it was loaded without this crate's descriptors), every
     /// `/internal/v1/*` request is refused.
@@ -59,12 +64,24 @@ impl InternalApi {
             "Requests to the internal listener, by route and status",
             requests.clone(),
         );
+        let rejected = Counter::default();
+        metrics.register(
+            "okoala_internal_connections_rejected",
+            "Connections to the internal listener closed because all connection slots were taken",
+            rejected.clone(),
+        );
         Self {
             config,
             metrics,
             readiness,
             requests,
+            rejected,
         }
+    }
+
+    /// Counts a connection closed over the connection cap.
+    pub(crate) fn connection_rejected(&self) {
+        self.rejected.inc();
     }
 
     /// The process readiness this handler reports.
@@ -74,62 +91,72 @@ impl InternalApi {
 
     /// Answers one request. Never panics, whatever the request.
     pub fn respond<B: Body>(&self, req: &Request<B>) -> Response<Full<Bytes>> {
-        let path = req.uri().path();
-        let (route, response) = self.route(req, path);
-        let status = response.status();
+        let (route, response) = self.route(req);
+        let status = response.status().as_u16();
         self.requests
-            .get_or_create(&RequestLabels {
-                route,
-                status: status.as_u16(),
-            })
+            .get_or_create(&RequestLabels { route, status })
             .inc();
-        // The path only: query strings and headers (`Authorization`) are never logged.
-        if status == StatusCode::UNAUTHORIZED {
-            tracing::info!(method = %req.method(), path, status = status.as_u16(), "internal request refused");
+        // Every request, refused ones included, is logged at `debug` only, so a client cannot flood the logs.
+        // Headers (`Authorization`) and query strings are never logged; under `/internal/v1/` not even the path
+        // is (a client could put a token in it by mistake), only the route name; elsewhere the path is cut.
+        let method = truncate(req.method().as_str(), 16);
+        if route == "other" {
+            let path = truncate(req.uri().path(), MAX_LOGGED_PATH);
+            tracing::debug!(method, route, path, status, "internal request");
         } else {
-            tracing::debug!(method = %req.method(), path, status = status.as_u16(), "internal request");
+            tracing::debug!(method, route, status, "internal request");
         }
         response
     }
 
-    fn route<B: Body>(
-        &self,
-        req: &Request<B>,
-        path: &str,
-    ) -> (&'static str, Response<Full<Bytes>>) {
+    fn route<B: Body>(&self, req: &Request<B>) -> (&'static str, Response<Full<Bytes>>) {
+        let path = req.uri().path();
         let internal = path == INTERNAL_PREFIX
             || path
                 .strip_prefix(INTERNAL_PREFIX)
                 .is_some_and(|rest| rest.starts_with('/'));
+        // The route (the metric label) is found first; the checks below only decide the answer.
+        let route = match path {
+            "/healthz" => "healthz",
+            "/readyz" => "readyz",
+            "/metrics" => "metrics",
+            "/internal/v1/ping" => "ping",
+            _ if internal => "internal_unknown",
+            _ => "other",
+        };
         // Authentication comes first, so an unauthenticated caller learns nothing about which routes exist.
         if internal && !self.authorized(req.headers()) {
             let mut response = text(StatusCode::UNAUTHORIZED, "unauthorized\n");
             response
                 .headers_mut()
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-            return ("internal", response);
+            return (route, response);
         }
-        // No route takes a body; refusing one keeps the request bounded and the connection reusable.
+        // No route takes a body; refusing one keeps the request bounded.
         if !req.body().is_end_stream() {
             let mut response = text(StatusCode::PAYLOAD_TOO_LARGE, "request body not allowed\n");
             response
                 .headers_mut()
                 .insert(header::CONNECTION, HeaderValue::from_static("close"));
-            return (if internal { "internal" } else { "other" }, response);
+            return (route, response);
         }
-        let route = match path {
-            "/healthz" => "healthz",
-            "/readyz" => "readyz",
-            "/metrics" => "metrics",
-            "/internal/v1/ping" => "internal",
-            _ if internal => return ("internal", text(StatusCode::NOT_FOUND, "not found\n")),
-            _ => return ("other", text(StatusCode::NOT_FOUND, "not found\n")),
+        if matches!(route, "internal_unknown" | "other") {
+            return (route, text(StatusCode::NOT_FOUND, "not found\n"));
+        }
+        // The probe and scrape routes also answer HEAD (hyper sends no body for it).
+        let (allowed, allow) = if route == "ping" {
+            (req.method() == Method::GET, "GET")
+        } else {
+            (
+                req.method() == Method::GET || req.method() == Method::HEAD,
+                "GET, HEAD",
+            )
         };
-        if req.method() != Method::GET {
+        if !allowed {
             let mut response = text(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
             response
                 .headers_mut()
-                .insert(header::ALLOW, HeaderValue::from_static("GET"));
+                .insert(header::ALLOW, HeaderValue::from_static(allow));
             return (route, response);
         }
         let response = match route {
@@ -187,6 +214,18 @@ fn bearer_token(headers: &HeaderMap) -> Option<&[u8]> {
     Some(token)
 }
 
+/// At most `max` bytes of `s`, cut on a character boundary.
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn text(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
     let mut response = Response::new(Full::new(body.into()));
     *response.status_mut() = status;
@@ -218,6 +257,14 @@ mod tests {
             map.append(header::AUTHORIZATION, HeaderValue::from_static(v));
         }
         map
+    }
+
+    #[test]
+    fn truncation_keeps_whole_characters() {
+        assert_eq!(truncate("abc", 5), "abc");
+        assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("aé", 2), "a");
+        assert_eq!(truncate("", 0), "");
     }
 
     #[test]

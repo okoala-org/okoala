@@ -6,7 +6,7 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -25,14 +25,17 @@ pub struct Limits {
     pub max_header_bytes: usize,
     /// The most headers in one request.
     pub max_headers: usize,
-    /// How long a client has to send a request's headers once it starts (and, on an idle kept-alive
-    /// connection, the next request's).
+    /// How long a client has to send a complete request head, counted from the moment the connection is
+    /// accepted (and, on a kept-alive connection, from the end of the previous response). Short, so that idle
+    /// or slow sockets cannot hold the connection slots that probes need.
     pub header_read_timeout: Duration,
     /// How long a connection may stay open in total; it is then closed.
     pub max_connection_age: Duration,
     /// The most connections served at once; further connections are closed on accept.
     pub max_connections: usize,
-    /// How long shutdown waits for open connections to finish their requests.
+    /// How long shutdown waits for open connections to finish their requests. Always at least one second
+    /// longer than `header_read_timeout`, so that a connection still sending its request head when shutdown
+    /// starts is closed by that timeout, not counted as a drain failure.
     pub drain_deadline: Duration,
 }
 
@@ -41,9 +44,9 @@ impl Default for Limits {
         Self {
             max_header_bytes: 16 * 1024,
             max_headers: 64,
-            header_read_timeout: Duration::from_secs(10),
+            header_read_timeout: Duration::from_secs(2),
             max_connection_age: Duration::from_secs(300),
-            max_connections: 256,
+            max_connections: 1024,
             drain_deadline: Duration::from_secs(10),
         }
     }
@@ -86,6 +89,8 @@ pub async fn serve(
     shutdown: CancellationToken,
 ) -> Result<(), InternalApiError> {
     let graceful = GracefulShutdown::new();
+    let mut over_cap = Summary::default();
+    let mut accept_failures = Summary::default();
     let slots = Arc::new(Semaphore::new(limits.max_connections));
     let mut builder = http1::Builder::new();
     builder
@@ -104,13 +109,22 @@ pub async fn serve(
             Ok(accepted) => accepted,
             Err(error) => {
                 // Out of file descriptors and the like: back off instead of spinning.
-                tracing::warn!(%error, "internal listener: accept failed");
+                if let Some(failures) = accept_failures.note() {
+                    tracing::warn!(%error, failures, "internal listener: accept failed");
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
         let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
-            tracing::warn!(%peer, "internal listener: too many connections, closing one");
+            api.connection_rejected();
+            if let Some(rejected) = over_cap.note() {
+                tracing::warn!(
+                    rejected,
+                    max_connections = limits.max_connections,
+                    "internal listener: connections over the cap closed"
+                );
+            }
             drop(stream);
             continue;
         };
@@ -132,10 +146,55 @@ pub async fn serve(
         });
     }
     drop(listener);
+    // Kept-alive idle connections close at once; one still sending its request head closes when the header
+    // timeout passes, which the deadline always outlasts.
+    let deadline = limits
+        .drain_deadline
+        .max(limits.header_read_timeout + Duration::from_secs(1));
     tokio::select! {
         () = graceful.shutdown() => Ok(()),
-        () = tokio::time::sleep(limits.drain_deadline) => Err(InternalApiError::DrainDeadline {
-            deadline: limits.drain_deadline,
-        }),
+        () = tokio::time::sleep(deadline) => Err(InternalApiError::DrainDeadline { deadline }),
+    }
+}
+
+/// How often a repeated warning is logged at most.
+const WARN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Counts occurrences of one event and lets a warning through at most once per [`WARN_INTERVAL`], with the
+/// number of occurrences since the last one, so a flood of events cannot flood the log.
+#[derive(Default)]
+struct Summary {
+    count: u64,
+    last: Option<Instant>,
+}
+
+impl Summary {
+    /// Records one occurrence; `Some(count)` when a warning is due now.
+    fn note(&mut self) -> Option<u64> {
+        self.count += 1;
+        let now = Instant::now();
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < WARN_INTERVAL)
+        {
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.count))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_let_one_warning_through_per_interval() {
+        let mut summary = Summary::default();
+        assert_eq!(summary.note(), Some(1));
+        assert_eq!(summary.note(), None);
+        assert_eq!(summary.note(), None);
+        summary.last = Some(Instant::now() - WARN_INTERVAL);
+        assert_eq!(summary.note(), Some(3));
     }
 }
