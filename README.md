@@ -27,8 +27,7 @@ slow down another's mail or calendars. OKoala stores its data in PostgreSQL and 
 deployed with a Helm chart on Kubernetes; a single server runs the same chart on a one-machine k3s cluster, set up by
 the `okoalactl` installer.
 
-**Status**: early development. The list above is what version 1 will provide; most of it is not built yet, and nothing
-here is ready for use.
+**Status**: Early Development. **NOT READY** for Testing or Production.
 
 ## License
 
