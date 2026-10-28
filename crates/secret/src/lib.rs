@@ -19,12 +19,18 @@ mod __internal {
 pub trait ValidSecretT: __internal::Sealed + Zeroize {
     type RevealedT: ?Sized;
 
+    fn bytes(&self) -> &[u8];
+
     fn reveal(&self) -> &Self::RevealedT;
 }
 
 impl __internal::Sealed for String {}
 impl ValidSecretT for String {
     type RevealedT = str;
+
+    fn bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
 
     fn reveal(&self) -> &Self::RevealedT {
         self.as_str()
@@ -35,6 +41,10 @@ impl __internal::Sealed for Vec<u8> {}
 impl ValidSecretT for Vec<u8> {
     type RevealedT = [u8];
 
+    fn bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+
     fn reveal(&self) -> &Self::RevealedT {
         self.as_slice()
     }
@@ -43,6 +53,10 @@ impl ValidSecretT for Vec<u8> {
 impl __internal::Sealed for Box<[u8]> {}
 impl ValidSecretT for Box<[u8]> {
     type RevealedT = [u8];
+
+    fn bytes(&self) -> &[u8] {
+        self    
+    }
 
     fn reveal(&self) -> &Self::RevealedT {
         self
@@ -53,6 +67,10 @@ impl __internal::Sealed for Box<str> {}
 impl ValidSecretT for Box<str> {
     type RevealedT = str;
 
+    fn bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
     fn reveal(&self) -> &Self::RevealedT {
         self
     }
@@ -61,6 +79,10 @@ impl ValidSecretT for Box<str> {
 impl<const N: usize> __internal::Sealed for [u8; N] {}
 impl<const N: usize> ValidSecretT for [u8; N] {
     type RevealedT = [u8];
+
+    fn bytes(&self) -> &[u8] {
+        &self[..]
+    }
 
     fn reveal(&self) -> &Self::RevealedT {
         &self[..]
@@ -84,38 +106,38 @@ impl<T: ValidSecretT> Secret<T> {
     }
 }
 
-impl<T: ValidSecretT + AsRef<[u8]>> Secret<T> {
+impl<T: ValidSecretT> Secret<T> {
     /// Constant time compare between `Secret<T>`s
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare(&self, other: &Secret<T>) -> bool {
-        if self.value.as_ref().is_empty() {
+        if self.value.bytes().is_empty() {
             return false;
         }
 
-        self.value.as_ref().ct_eq(other.value.as_ref()).into()
+        self.value.bytes().ct_eq(other.value.bytes()).into()
     }
 
     /// Constant time compare between `Secret<T>` and `T`
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare_value(&self, other: &T) -> bool {
-        if self.value.as_ref().is_empty() {
+        if self.value.bytes().is_empty() {
             return false;
         }
 
-        self.value.as_ref().ct_eq(other.as_ref()).into()
+        self.value.bytes().ct_eq(other.bytes()).into()
     }
 
     /// Constant time compare between `Secret<T>` and bytes
     /// [IMPORTANT]: when lengths are different, this returns immediately (not constant time)
     #[must_use]
     pub fn compare_bytes(&self, other: &[u8]) -> bool {
-        if self.value.as_ref().is_empty() {
+        if self.value.bytes().is_empty() {
             return false;
         }
 
-        self.value.as_ref().ct_eq(other).into()
+        self.value.bytes().ct_eq(other).into()
     }
 }
 
