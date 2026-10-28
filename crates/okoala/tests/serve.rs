@@ -56,7 +56,7 @@ fn check_accepts_a_valid_config() {
     let config = write_config(
         &dir,
         &format!(
-            "[internal]\nlisten = \"127.0.0.1:9090\"\ntoken = {{ file = '{}' }}\n",
+            "[internal]\nlisten = \"127.0.0.1:9090\"\ntoken = {{ secret_file = '{}' }}\n",
             secret.display()
         ),
     );
@@ -73,7 +73,7 @@ fn check_reports_every_error_and_fails() {
     let config = write_config(
         &dir,
         &format!(
-            "[internal]\ntoken = {{ file = '{}' }}\n\n[imap]\n\n[http]\n",
+            "[internal]\ntoken = {{ secret_file = '{}' }}\n\n[imap]\n\n[http]\n",
             secret.display()
         ),
     );
@@ -111,7 +111,7 @@ fn environment_overrides_reach_the_process() {
     let out = Command::new(env!("CARGO_BIN_EXE_okoala"))
         .args(["serve", "--check", "--config", config.to_str().unwrap()])
         .env_clear()
-        .env("OKOALA_INTERNAL__TOKEN__FILE", &secret)
+        .env("OKOALA_INTERNAL__TOKEN__SECRET_FILE", &secret)
         .env("OKOALA_INTERNAL__LISTEN", "\"[::1]:9091\"")
         .output()
         .unwrap();
@@ -124,7 +124,10 @@ fn serve_without_roles_validates_and_exits() {
     let secret = write_secret(&dir, 0o400);
     let config = write_config(
         &dir,
-        &format!("[internal]\ntoken = {{ file = '{}' }}\n", secret.display()),
+        &format!(
+            "[internal]\ntoken = {{ secret_file = '{}' }}\n",
+            secret.display()
+        ),
     );
     let out = okoala(&["serve", "--config", config.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out.stderr));

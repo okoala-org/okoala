@@ -93,7 +93,10 @@ fn wrong_type_in_array_is_reported_with_its_index() {
 fn missing_required_field_is_reported() {
     let dir = temp_dir("missing-field");
     let token = secret_file(&dir, "token", TEST_SECRET.as_bytes(), 0o400);
-    let text = format!("[internal]\ntoken = {{ file = '{}' }}\n", token.display());
+    let text = format!(
+        "[internal]\ntoken = {{ secret_file = '{}' }}\n",
+        token.display()
+    );
     let errors = load(&text).unwrap_err();
     assert_eq!(errors.len(), 1, "{errors}");
     let error = &errors.errors()[0];
@@ -106,7 +109,7 @@ fn missing_required_field_is_reported() {
 
 #[test]
 fn all_errors_are_reported_together() {
-    let text = "[http]\nhostname = \"x\"\nport = 70000\n\n[internal]\ntoken = { file = '/nonexistent/token' }\n\n[smtp]\n\n[imap]\n";
+    let text = "[http]\nhostname = \"x\"\nport = 70000\n\n[internal]\ntoken = { secret_file = '/nonexistent/token' }\n\n[smtp]\n\n[imap]\n";
     let errors = load(text).unwrap_err();
     let rendered = errors.to_string();
     assert_eq!(errors.len(), 4, "{rendered}");
@@ -265,4 +268,74 @@ fn get_returns_none_for_an_unregistered_section() {
         .unwrap();
     assert!(config.get::<Http>().is_none());
     assert_eq!(format!("{config:?}"), "Config { sections: [\"deploy\"] }");
+}
+
+/// A field type whose own error message quotes its input, as many `FromStr`-based types do.
+#[derive(Debug)]
+struct Echo;
+
+impl<'de> Deserialize<'de> for Echo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let input = String::deserialize(deserializer)?;
+        Err(serde::de::Error::custom(format!("cannot parse {input:?}")))
+    }
+}
+
+// Fields are only deserialized: every test input is invalid.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Echoing {
+    #[serde(default)]
+    echo: Option<Echo>,
+    #[serde(default)]
+    addr: Option<std::net::SocketAddr>,
+    #[serde(default)]
+    mode: Option<Mode>,
+}
+
+impl Section for Echoing {
+    const NAME: &'static str = "echoing";
+}
+
+#[test]
+fn field_values_are_never_echoed() {
+    let mut registry = Registry::new();
+    registry
+        .register(SectionDescriptor::of::<Echoing>())
+        .unwrap();
+    for key in ["echo", "addr", "mode"] {
+        let from_file = format!("[echoing]\n{key} = \"{TEST_SECRET}\"\n");
+        let env = MapEnvironment::new();
+        let errors = Loader::new(&registry, &env)
+            .load_str(&from_file)
+            .unwrap_err();
+        assert_eq!(errors.errors()[0].key(), Some(key), "{errors}");
+        common::assert_no_secret(&errors);
+
+        let env = MapEnvironment::new().with(
+            format!("OKOALA_ECHOING__{}", key.to_uppercase()),
+            TEST_SECRET,
+        );
+        let errors = Loader::new(&registry, &env).load_str("").unwrap_err();
+        assert_eq!(errors.errors()[0].key(), Some(key), "{errors}");
+        common::assert_no_secret(&errors);
+    }
+    let env = MapEnvironment::new();
+    let errors = Loader::new(&registry, &env)
+        .load_str(&format!("[echoing]\nmode = \"{TEST_SECRET}\"\n"))
+        .unwrap_err();
+    assert!(
+        errors.errors()[0]
+            .message()
+            .contains("unknown variant; expected one of `Single`, `Split`"),
+        "{errors}"
+    );
+    let errors = Loader::new(&registry, &env)
+        .load_str(&format!("[echoing]\necho = \"{TEST_SECRET}\"\n"))
+        .unwrap_err();
+    assert!(
+        errors.errors()[0].message().starts_with("invalid value"),
+        "{errors}"
+    );
 }

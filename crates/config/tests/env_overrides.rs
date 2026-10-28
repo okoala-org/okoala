@@ -51,7 +51,10 @@ fn override_can_supply_a_whole_section() {
     let token = secret_file(&dir, "token", TEST_SECRET.as_bytes(), 0o400);
     let env = MapEnvironment::new()
         .with("OKOALA_HTTP__HOSTNAME", "from-env.example.com")
-        .with("OKOALA_INTERNAL__TOKEN__FILE", token.display().to_string());
+        .with(
+            "OKOALA_INTERNAL__TOKEN__SECRET_FILE",
+            token.display().to_string(),
+        );
     let config = load("", &env).unwrap();
     assert_eq!(
         config.get::<Http>().unwrap().hostname,

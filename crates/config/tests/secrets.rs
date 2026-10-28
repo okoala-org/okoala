@@ -119,8 +119,8 @@ fn one_trailing_newline_is_stripped() {
     let cases: [(&[u8], &str); 4] = [
         (b"value\n", "value"),
         (b"value\r\n", "value"),
-        (b"value\n\n", "value\n"),
         (b"value", "value"),
+        (b" spaced value ", " spaced value "),
     ];
     for (i, (contents, expected)) in cases.iter().enumerate() {
         let path = secret_file(&dir, &format!("token-{i}"), contents, 0o400);
@@ -129,24 +129,151 @@ fn one_trailing_newline_is_stripped() {
 }
 
 #[test]
-fn empty_secrets_are_rejected() {
+fn multi_line_text_secrets_are_rejected() {
+    let dir = temp_dir("multi-line");
+    for (i, contents) in [
+        &b"value\n\n"[..],
+        b"line one\nline two",
+        b"value\r",
+        b"a\rb\n",
+        b"\nvalue",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let path = secret_file(&dir, &format!("token-{i}"), contents, 0o400);
+        let errors = load_token_file(&path, &dir).unwrap_err();
+        let error = &errors.errors()[0];
+        assert_eq!(error.key(), Some("token"));
+        assert!(error.message().contains("contains a line break"), "{error}");
+    }
+    // Byte secrets are exempt.
+    let token = secret_file(&dir, "token", TEST_SECRET.as_bytes(), 0o400);
+    let seed = secret_file(&dir, "seed", b"a\nb\r\n\n", 0o400);
+    let text = format!(
+        "{HTTP}[internal]\ntoken = {{ secret_file = '{}' }}\nseed = {{ secret_file = '{}' }}\n",
+        token.display(),
+        seed.display()
+    );
+    let config = load_with(&text, &MapEnvironment::new(), &dir).unwrap();
+    let internal = config.get::<Internal>().unwrap();
+    assert_eq!(
+        internal.seed.as_ref().unwrap().reveal_value(),
+        b"a\nb\r\n\n"
+    );
+}
+
+#[test]
+fn empty_and_blank_secrets_are_rejected() {
     let dir = temp_dir("empty");
     let k8s = temp_dir("empty-k8s");
-    for (i, contents) in [&b""[..], b"\n", b"\r\n"].iter().enumerate() {
+    for (i, contents) in [&b""[..], b"\n", b"\r\n", b"   ", b" \t \n"]
+        .iter()
+        .enumerate()
+    {
         let path = secret_file(&dir, &format!("token-{i}"), contents, 0o400);
         let errors = load_token_file(&path, &k8s).unwrap_err();
         let error = &errors.errors()[0];
         assert_eq!(error.key(), Some("token"));
-        assert!(error.message().ends_with("is empty"), "{error}");
+        let message = error.message();
+        assert!(
+            message.ends_with("is empty") || message.ends_with("is empty or only whitespace"),
+            "{error}"
+        );
     }
+    let seed = secret_file(&dir, "seed", b"", 0o400);
+    let token = secret_file(&dir, "token", TEST_SECRET.as_bytes(), 0o400);
+    let text = format!(
+        "{HTTP}[internal]\ntoken = {{ secret_file = '{}' }}\nseed = {{ secret_file = '{}' }}\n",
+        token.display(),
+        seed.display()
+    );
+    let errors = load_with(&text, &MapEnvironment::new(), &k8s).unwrap_err();
+    assert_eq!(errors.errors()[0].key(), Some("seed"), "{errors}");
+    assert!(
+        errors.errors()[0].message().ends_with("is empty"),
+        "{errors}"
+    );
+
     let env = MapEnvironment::new().with("TOKEN", "");
-    let text = format!("{HTTP}[internal]\ntoken = {{ env = \"TOKEN\" }}\n");
+    let text = format!("{HTTP}[internal]\ntoken = {{ secret_env = \"TOKEN\" }}\n");
     let errors = load_with(&text, &env, &k8s).unwrap_err();
     assert!(
         errors
             .to_string()
             .contains("environment variable TOKEN is empty"),
         "{errors}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_is_rejected_without_blocking() {
+    let dir = temp_dir("fifo");
+    let k8s = temp_dir("fifo-k8s");
+    for (base, mode) in [(&dir, 0o400), (&k8s, 0o444)] {
+        let path = base.join("token");
+        let status = std::process::Command::new("mkfifo")
+            .arg("-m")
+            .arg(format!("{mode:o}"))
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // Run the load on another thread so a regression shows as a failure, not a hung test run.
+        let (send, receive) = std::sync::mpsc::channel();
+        let k8s_dir = k8s.clone();
+        std::thread::spawn(move || {
+            let result = load_token_file(&path, &k8s_dir).map(|_| ());
+            let _ = send.send(result.map_err(|e| e.to_string()));
+        });
+        let result = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("loading a FIFO must not block");
+        let error = result.unwrap_err();
+        assert!(error.contains("is not a regular file"), "{error}");
+    }
+}
+
+#[test]
+fn secret_variable_with_an_override_name_is_rejected() {
+    let dir = temp_dir("override-name");
+    let env = MapEnvironment::new().with("OKOALA_INTERNAL__TOKEN", TEST_SECRET);
+    let text = format!("{HTTP}[internal]\ntoken = {{ secret_env = \"OKOALA_INTERNAL__TOKEN\" }}\n");
+    let errors = load_with(&text, &env, &dir).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors}");
+    let error = &errors.errors()[0];
+    assert_eq!(error.key(), Some("token"));
+    assert!(
+        error
+            .message()
+            .contains("has the form of a configuration override"),
+        "{error}"
+    );
+    assert_no_secret(&errors);
+}
+
+#[test]
+fn secret_errors_are_reported_next_to_a_structural_error() {
+    let dir = temp_dir("structural-and-secret");
+    let text = format!(
+        "{HTTP}[internal]\naaa = 1\ntoken = {{ secret_file = '/nonexistent' }}\n\
+         seed = {{ secret_env = \"MISSING\" }}\n"
+    );
+    let errors = load_with(&text, &MapEnvironment::new(), &dir).unwrap_err();
+    let rendered = errors.to_string();
+    assert_eq!(errors.len(), 3, "{rendered}");
+    assert!(
+        rendered.contains("[internal] aaa: unknown field `aaa`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("[internal] token: cannot open secret file /nonexistent"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("[internal] seed: environment variable MISSING is not set"),
+        "{rendered}"
     );
 }
 
@@ -167,7 +294,7 @@ fn byte_secrets_are_taken_as_they_are() {
     let token = secret_file(&dir, "token", TEST_SECRET.as_bytes(), 0o400);
     let seed = secret_file(&dir, "seed", &[0, 1, 0xff, b'\n'], 0o440);
     let text = format!(
-        "{HTTP}[internal]\ntoken = {{ file = '{}' }}\nseed = {{ file = '{}' }}\n",
+        "{HTTP}[internal]\ntoken = {{ secret_file = '{}' }}\nseed = {{ secret_file = '{}' }}\n",
         token.display(),
         seed.display()
     );
@@ -187,7 +314,7 @@ fn secret_from_an_environment_variable() {
         .with("OKOALA_INTERNAL_TOKEN", format!("{TEST_SECRET}\n"))
         .with("HOOK", "hook-value");
     let text = format!(
-        "{HTTP}[internal]\ntoken = {{ env = \"OKOALA_INTERNAL_TOKEN\" }}\nhook_token = {{ env = \"HOOK\" }}\n"
+        "{HTTP}[internal]\ntoken = {{ secret_env = \"OKOALA_INTERNAL_TOKEN\" }}\nhook_token = {{ secret_env = \"HOOK\" }}\n"
     );
     let config = load_with(&text, &env, &dir).unwrap();
     assert_eq!(token(&config), TEST_SECRET);
@@ -201,7 +328,7 @@ fn secret_from_an_environment_variable() {
 #[test]
 fn unset_environment_variable_is_an_error() {
     let dir = temp_dir("env-unset");
-    let text = format!("{HTTP}[internal]\ntoken = {{ env = \"NOT_SET\" }}\n");
+    let text = format!("{HTTP}[internal]\ntoken = {{ secret_env = \"NOT_SET\" }}\n");
     let errors = load_with(&text, &MapEnvironment::new(), &dir).unwrap_err();
     assert!(
         errors
@@ -217,7 +344,7 @@ fn inline_and_malformed_references_are_rejected_without_echo() {
     for reference in [
         format!("\"{TEST_SECRET}\""),
         format!("{{ value = \"{TEST_SECRET}\" }}"),
-        format!("{{ file = \"/a\", env = \"{TEST_SECRET}\" }}"),
+        format!("{{ secret_file = \"/a\", secret_env = \"{TEST_SECRET}\" }}"),
         "42".to_owned(),
         format!("[\"{TEST_SECRET}\"]"),
     ] {
@@ -228,7 +355,7 @@ fn inline_and_malformed_references_are_rejected_without_echo() {
         assert!(
             error
                 .message()
-                .contains("{ file = \"<path>\" } or { env = \"<VARIABLE>\" }"),
+                .contains("{ secret_file = \"<path>\" } or { secret_env = \"<VARIABLE>\" }"),
             "{error}"
         );
         assert_no_secret(&errors);
@@ -240,7 +367,7 @@ fn every_secret_error_is_reported() {
     let dir = temp_dir("all-secret-errors");
     let bad = secret_file(&dir, "bad", TEST_SECRET.as_bytes(), 0o644);
     let text = format!(
-        "{HTTP}[internal]\ntoken = {{ file = '{}' }}\nhook_token = {{ env = \"MISSING\" }}\nseed = {{ file = '/nonexistent' }}\n",
+        "{HTTP}[internal]\ntoken = {{ secret_file = '{}' }}\nhook_token = {{ secret_env = \"MISSING\" }}\nseed = {{ secret_file = '/nonexistent' }}\n",
         bad.display()
     );
     let errors = load_with(&text, &MapEnvironment::new(), &dir).unwrap_err();
@@ -262,6 +389,17 @@ fn secret_fields_cannot_be_deserialized_outside_the_loader() {
         error.contains("a secret reference loaded by okoala-config"),
         "{error}"
     );
+
+    // serde's own value deserializers do not get through either, and their errors do not echo the value.
+    use serde::de::IntoDeserializer;
+    use serde::de::value::{Error as ValueError, StringDeserializer};
+    let plain: StringDeserializer<ValueError> = TEST_SECRET.to_owned().into_deserializer();
+    let error = okoala_config::secret::string(plain)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains(TEST_SECRET), "{error}");
+    let plain: StringDeserializer<ValueError> = TEST_SECRET.to_owned().into_deserializer();
+    assert!(okoala_config::secret::bytes(plain).is_err());
 }
 
 #[test]

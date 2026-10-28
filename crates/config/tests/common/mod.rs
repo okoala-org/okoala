@@ -95,7 +95,7 @@ pub fn set_mode(_path: &Path, _mode: u32) {}
 /// A config with the required `http` and `internal` sections, the token read from `token_path`.
 pub fn config_with_token(token_path: &Path) -> String {
     format!(
-        "[http]\nhostname = \"mail.example.com\"\n\n[internal]\ntoken = {{ file = '{}' }}\n",
+        "[http]\nhostname = \"mail.example.com\"\n\n[internal]\ntoken = {{ secret_file = '{}' }}\n",
         token_path.display()
     )
 }
