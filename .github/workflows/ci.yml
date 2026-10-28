@@ -15,8 +15,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # A job fails when the runner has less free disk than this (GiB) at its end. Hosted runners start
-  # with about 14 GiB free after the image; the test job ends near 5 GiB left, so 3 leaves headroom
-  # for growth while failing before the disk fills and breaks a build with an obscure error.
+  # with about 13 GiB free of 72 (measured; the workspace is still small and uses under 1 GiB), so 3
+  # leaves headroom for growth while failing before the disk fills and breaks a build obscurely.
   MIN_FREE_GIB: "3"
 
 # The toolchain (version and components) comes from rust-toolchain.toml; rustup on the
