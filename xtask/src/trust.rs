@@ -7,8 +7,9 @@ use crate::git;
 use crate::levels::{Level, Levels};
 use std::path::Path;
 
-/// Names that mark a co-author as an AI (matched case-insensitively against the whole trailer value).
-/// The only place this list lives.
+/// Substrings that mark a name, e-mail or trailer value as an AI or a bot (matched case-insensitively).
+/// The only place this list lives. Over-matching is the safe direction: a false positive only matters
+/// on a commit that touches T0, where a human can look at it.
 pub const AI_MARKERS: &[&str] = &[
     "claude",
     "anthropic",
@@ -17,24 +18,60 @@ pub const AI_MARKERS: &[&str] = &[
     "copilot",
     "gemini",
     "codex",
+    "cursor",
+    "devin",
+    "aider",
+    "cline",
+    "deepseek",
+    "qwen",
+    "grok",
+    "mistral",
+    "llama",
+    "amazon q",
+    "[bot]",
 ];
 
-/// Co-author trailer values of a commit message that name an AI.
+/// Trailer keys whose value may name an AI (compared case-insensitively).
+const TRAILER_KEYS: &[&str] = &["co-authored-by", "assisted-by", "generated-by"];
+
+fn names_ai(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    AI_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Join continuation lines (starting with space or tab) onto the previous line.
+fn unfold(message: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in message.lines() {
+        match lines.last_mut() {
+            Some(prev) if line.starts_with([' ', '\t']) => {
+                prev.push(' ');
+                prev.push_str(line.trim());
+            }
+            _ => lines.push(line.to_owned()),
+        }
+    }
+    lines
+}
+
+/// Trailer values of a commit message (Co-Authored-By, Assisted-by, Generated-by) that name an AI.
 pub fn ai_coauthors(message: &str) -> Vec<String> {
-    message
-        .lines()
+    unfold(message)
+        .iter()
         .filter_map(|line| {
             let (key, value) = line.split_once(':')?;
-            if !key.trim().eq_ignore_ascii_case("co-authored-by") {
+            let key = key.trim();
+            if !TRAILER_KEYS.iter().any(|k| key.eq_ignore_ascii_case(k)) {
                 return None;
             }
-            let lower = value.to_ascii_lowercase();
-            AI_MARKERS
-                .iter()
-                .any(|m| lower.contains(m))
-                .then(|| value.trim().to_owned())
+            names_ai(value).then(|| value.trim().to_owned())
         })
         .collect()
+}
+
+/// Author or committer identities that name an AI.
+pub fn ai_identities(identities: &[String]) -> Vec<String> {
+    identities.iter().filter(|i| names_ai(i)).cloned().collect()
 }
 
 /// Default range: the commits not on `origin/main`; without that ref, only HEAD.
@@ -54,7 +91,8 @@ fn check_commits(root: &Path, range: &str) -> Result<usize, String> {
     let mut offenders = 0;
     let commits = git::commits(root, range)?;
     for hash in &commits {
-        let authors = ai_coauthors(&git::message(root, hash)?);
+        let mut authors = ai_coauthors(&git::message(root, hash)?);
+        authors.extend(ai_identities(&git::identities(root, hash)?));
         if authors.is_empty() {
             continue;
         }
@@ -67,7 +105,7 @@ fn check_commits(root: &Path, range: &str) -> Result<usize, String> {
         }
         offenders += 1;
         eprintln!(
-            "commit {hash} touches T0 and has an AI co-author trailer ({}):",
+            "commit {hash} touches T0 and names an AI (trailer, author or committer) ({}):",
             authors.join("; ")
         );
         for p in t0 {
@@ -218,6 +256,89 @@ mod tests {
             ai_coauthors("x\n\nCo-authored-by: ChatGPT <c@d.e>").len(),
             1
         );
+    }
+
+    #[test]
+    fn detects_folded_and_other_trailers() {
+        assert_eq!(
+            ai_coauthors("x\n\nCo-Authored-By:\n Claude <noreply@anthropic.com>\n").len(),
+            1
+        );
+        assert_eq!(
+            ai_coauthors("x\n\nCo-Authored-By:\n\tClaude <c@d.e>").len(),
+            1
+        );
+        assert_eq!(
+            ai_coauthors("x\n\nCo-Authored-By: Jane\n  Doe <j@d.e>\n").len(),
+            0
+        );
+        assert_eq!(ai_coauthors("x\n\nAssisted-by: Cursor").len(), 1);
+        assert_eq!(ai_coauthors("x\n\nGENERATED-BY: Amazon Q").len(), 1);
+        assert_eq!(
+            ai_coauthors("x\n\nCo-authored-by: dependabot[bot] <a@b.c>").len(),
+            1
+        );
+        assert!(ai_coauthors("x\n\nReviewed-by: Claude <a@b.c>").is_empty());
+    }
+
+    #[test]
+    fn detects_ai_identities() {
+        let ids = vec![
+            "Jane <jane@example.com>".to_owned(),
+            "Claude <noreply@anthropic.com>".to_owned(),
+        ];
+        assert_eq!(ai_identities(&ids).len(), 1);
+        assert!(ai_identities(&ids[..1]).is_empty());
+    }
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            st.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&st.stderr)
+        );
+    }
+
+    #[test]
+    fn merge_is_diffed_against_first_parent_only() {
+        let dir = std::env::temp_dir().join(format!("xtask-merge-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("t0")).expect("mkdir");
+        run_git(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a"), "1").expect("write");
+        run_git(&dir, &["add", "a"]);
+        run_git(&dir, &["commit", "-q", "-m", "base"]);
+        run_git(&dir, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(dir.join("t0/x"), "1").expect("write");
+        run_git(&dir, &["add", "t0/x"]);
+        run_git(&dir, &["commit", "-q", "-m", "side touches t0"]);
+        run_git(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("a"), "2").expect("write");
+        run_git(&dir, &["commit", "-q", "-am", "main change"]);
+        run_git(&dir, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+
+        // The merge itself, against parent 1 (main), brings t0/x in: it IS listed.
+        let paths = git::changed_paths(&dir, "HEAD").expect("paths");
+        assert_eq!(paths, vec!["t0/x"]);
+        // Against parent 1 a change that only main made is not listed.
+        assert!(!paths.contains(&"a".to_owned()));
+        // The side commit is listed on its own.
+        let side = git::changed_paths(&dir, "HEAD^2").expect("paths");
+        assert_eq!(side, vec!["t0/x"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

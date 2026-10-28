@@ -31,11 +31,14 @@ unused-allowed-license = "allow"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 # TLS policy: rustls with the ring provider only.
 deny = [
   { crate = "openssl" },
   { crate = "openssl-sys" },
   { crate = "native-tls" },
+  { crate = "openssl-src" },
+  { crate = "hyper-tls" },
 ]
 
 [sources]

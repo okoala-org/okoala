@@ -7,4 +7,8 @@ allow-dbg-in-tests = true
 disallowed-methods = [
   { path = "std::process::exit", reason = "skips destructors, so secrets are not zeroized; return from main instead" },
   { path = "std::boxed::Box::leak", reason = "the leaked value is never dropped, so secrets in it are not zeroized" },
+  { path = "std::vec::Vec::leak", reason = "the leaked buffer is never dropped, so secrets in it are not zeroized" },
+  { path = "std::string::String::leak", reason = "the leaked string is never dropped, so secrets in it are not zeroized" },
+  { path = "std::boxed::Box::into_raw", reason = "hands out ownership without a drop, so secrets in it are not zeroized unless freed by hand" },
+  { path = "std::process::abort", reason = "skips destructors, so secrets are not zeroized; return an error instead" },
 ]
