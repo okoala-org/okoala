@@ -1,0 +1,23 @@
+[package]
+name = "okoala-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+okoala-config = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus-client = { workspace = true }
+
+[dev-dependencies]
+okoala-secret = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
