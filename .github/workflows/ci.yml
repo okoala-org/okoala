@@ -14,6 +14,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A job fails when the runner has less free disk than this (GiB) at its end. Hosted runners start
+  # with about 14 GiB free after the image; the test job ends near 5 GiB left, so 3 leaves headroom
+  # for growth while failing before the disk fills and breaks a build with an obscure error.
+  MIN_FREE_GIB: "3"
 
 # The toolchain (version and components) comes from rust-toolchain.toml; rustup on the
 # runner installs it on the first cargo call.
@@ -34,17 +38,100 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Disk budget
+        if: always()
+        run: |
+          df -h /
+          du -sh target || true
+          avail_gib=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "free: ${avail_gib} GiB (minimum ${MIN_FREE_GIB})"
+          test "$avail_gib" -ge "$MIN_FREE_GIB"
 
+  # Unit and (later) integration tests on both PostgreSQL legs. The Postgres service is not used
+  # by any test yet; the smoke step proves it is up. SeaweedFS runs as a plain `docker run` step
+  # because a service container cannot be given a start command.
   test:
+    name: test (postgres ${{ matrix.pg_major }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # postgres:17
+          - pg_major: 17
+            pg_image: postgres@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+          # postgres:18, the newest major. Move this leg when a new major ships.
+          - pg_major: 18
+            pg_image: postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    services:
+      postgres:
+        image: ${{ matrix.pg_image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Superuser URL (the password is that of the throwaway container above; the `env` context is not
+      # available in service or job-level env, so it is repeated): tests create template databases from it. Ephemeral container, not a secret.
+      OKOALA_TEST_DATABASE_URL: postgres://postgres:ci-only-postgres@localhost:5432/postgres
+      OKOALA_TEST_S3_ENDPOINT: http://localhost:8333
+      # Dummy credentials; the test SeaweedFS has no identities configured, so any pair is accepted.
+      OKOALA_TEST_S3_ACCESS_KEY: okoala-ci
+      OKOALA_TEST_S3_SECRET_KEY: okoala-ci-secret
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Both legs build the same artefacts; the cache key must not differ per leg.
+          shared-key: test
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: nextest
+      - name: Start SeaweedFS (S3)
+        # chrislusf/seaweedfs 4.48
+        run: |
+          docker run -d --name seaweedfs --network host \
+            chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d \
+            server -dir=/data -volume.max=8 -s3 -s3.port=8333 -ip=127.0.0.1
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://localhost:8333/; then exit 0; fi
+            sleep 2
+          done
+          docker logs seaweedfs
+          echo "SeaweedFS S3 did not come up" >&2
+          exit 1
+      - name: Smoke - PostgreSQL
+        env:
+          PGPASSWORD: ci-only-postgres
+        run: |
+          pg_isready -h localhost -p 5432 -U postgres
+          psql -h localhost -U postgres -tAc "select version()"
+      - name: Smoke - S3 endpoint
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$OKOALA_TEST_S3_ENDPOINT/")
+          echo "S3 endpoint answered HTTP $code"
+          test "$code" -lt 500
       - name: Build
         run: cargo build --workspace --all-targets --locked
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+      - name: Doctests
+        run: cargo test --workspace --doc --locked
+      - name: Disk budget
+        if: always()
+        run: |
+          df -h /
+          du -sh target || true
+          avail_gib=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "free: ${avail_gib} GiB (minimum ${MIN_FREE_GIB})"
+          test "$avail_gib" -ge "$MIN_FREE_GIB"
 
   # Repository policy: SPDX headers, no AI co-author trailer on commits touching T0 paths, and the
   # lint policy (see xtask/ and TRUST_LEVELS.toml).
@@ -62,6 +149,14 @@ jobs:
       # commits unchecked.
       - name: Trust levels
         run: cargo xtask check-trust --all
+      - name: Disk budget
+        if: always()
+        run: |
+          df -h /
+          du -sh target || true
+          avail_gib=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "free: ${avail_gib} GiB (minimum ${MIN_FREE_GIB})"
+          test "$avail_gib" -ge "$MIN_FREE_GIB"
 
   # Licences, banned crates (openssl, native-tls), sources and RustSec advisories (deny.toml).
   deny:
