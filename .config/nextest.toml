@@ -1,0 +1,13 @@
+# cargo-nextest configuration. Local runs use the default profile; CI uses `--profile ci`.
+# Doctests are not run by nextest; CI runs them with `cargo test --doc`.
+
+[profile.ci]
+# No retries: a flaky test must fail the job, not hide behind a retry.
+retries = 0
+# Report every failing test of the run, not only the first.
+fail-fast = false
+# A test slower than one minute is flagged; after five minutes it is killed and the job fails.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci.junit]
+path = "junit.xml"
