@@ -13,8 +13,8 @@ fn s(value: &str) -> Secret<String> {
 
 /// Compares through both methods and checks that they agree.
 fn same(left: &str, right: &str) -> bool {
-    let by_secret = s(left).compare(s(right));
-    let by_value = s(left).compare_value(String::from(right));
+    let by_secret = s(left).compare(&s(right));
+    let by_value = s(left).compare_value(&String::from(right));
     assert_eq!(
         by_secret, by_value,
         "compare and compare_value disagree: {left:?} {right:?}"
@@ -72,34 +72,48 @@ fn comparison_is_symmetric() {
 #[test]
 fn comparing_does_not_change_the_secret() {
     let secret = s("token-123");
-    assert!(!secret.compare_value(String::from("wrong")));
-    assert!(secret.compare_value(String::from("token-123")));
-    assert!(secret.compare(s("token-123")));
+    assert!(!secret.compare_value(&String::from("wrong")));
+    assert!(secret.compare_value(&String::from("token-123")));
+    assert!(secret.compare(&s("token-123")));
     assert_eq!(secret.reveal_value(), "token-123");
+}
+
+#[test]
+fn both_secrets_stay_usable_after_comparing() {
+    let stored = s("token-123");
+    let presented = s("token-123");
+    assert!(stored.compare(&presented));
+    assert!(presented.compare(&stored));
+    assert_eq!(stored.reveal_value(), "token-123");
+    assert_eq!(presented.reveal_value(), "token-123");
+
+    let expected = String::from("token-123");
+    assert!(stored.compare_value(&expected));
+    assert_eq!(expected, "token-123", "the compared value is only borrowed");
 }
 
 #[test]
 fn byte_secrets_compare_correctly() {
     let a = Secret::new(vec![1u8, 2, 3]);
-    assert!(a.compare(Secret::new(vec![1u8, 2, 3])));
-    assert!(!a.compare(Secret::new(vec![1u8, 2, 4])));
-    assert!(!a.compare(Secret::new(vec![1u8, 2])));
-    assert!(a.compare_value(vec![1u8, 2, 3]));
-    assert!(!a.compare_value(vec![1u8, 2, 3, 4]));
-    assert!(Secret::new(Vec::<u8>::new()).compare_value(Vec::new()));
+    assert!(a.compare(&Secret::new(vec![1u8, 2, 3])));
+    assert!(!a.compare(&Secret::new(vec![1u8, 2, 4])));
+    assert!(!a.compare(&Secret::new(vec![1u8, 2])));
+    assert!(a.compare_value(&vec![1u8, 2, 3]));
+    assert!(!a.compare_value(&vec![1u8, 2, 3, 4]));
+    assert!(Secret::new(Vec::<u8>::new()).compare_value(&Vec::new()));
 }
 
 #[test]
 fn fixed_size_keys_compare_correctly() {
     let key = Secret::new([9u8; 32]);
-    assert!(key.compare(Secret::new([9u8; 32])));
-    assert!(key.compare_value([9u8; 32]));
+    assert!(key.compare(&Secret::new([9u8; 32])));
+    assert!(key.compare_value(&[9u8; 32]));
     let mut other = [9u8; 32];
     other[31] = 8;
-    assert!(!key.compare_value(other));
+    assert!(!key.compare_value(&other));
     other[31] = 9;
     other[0] = 8;
-    assert!(!key.compare(Secret::new(other)));
+    assert!(!key.compare(&Secret::new(other)));
 }
 
 /// Compares every pair from a set of tricky inputs against plain byte equality, through
@@ -131,12 +145,12 @@ fn every_form_agrees_with_plain_byte_equality() {
 
             let bytes = Secret::new(left.as_bytes().to_vec());
             assert_eq!(
-                bytes.compare(Secret::new(right.as_bytes().to_vec())),
+                bytes.compare(&Secret::new(right.as_bytes().to_vec())),
                 expected,
                 "Vec<u8> compare: {left:?} {right:?}"
             );
             assert_eq!(
-                bytes.compare_value(right.as_bytes().to_vec()),
+                bytes.compare_value(&right.as_bytes().to_vec()),
                 expected,
                 "Vec<u8> compare_value: {left:?} {right:?}"
             );
