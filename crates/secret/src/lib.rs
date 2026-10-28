@@ -9,29 +9,63 @@
 //! responsibility lies with the users of this crate.
 
 use std::fmt;
-use zeroize::Zeroize;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 mod __internal {
     pub trait Sealed {}
 }
 
-pub trait ValidSecretT: __internal::Sealed + Zeroize {}
+pub trait ValidSecretT: __internal::Sealed + Zeroize {
+    type RevealedT: ?Sized;
+
+    fn reveal(&self) -> &Self::RevealedT;
+}
 
 impl __internal::Sealed for String {}
-impl ValidSecretT for String {}
+impl ValidSecretT for String {
+    type RevealedT = str;
+
+    fn reveal(&self) -> &Self::RevealedT {
+        self.as_str()
+    }
+}
 
 impl __internal::Sealed for Vec<u8> {}
-impl ValidSecretT for Vec<u8> {}
+impl ValidSecretT for Vec<u8> {
+    type RevealedT = [u8];
+
+    fn reveal(&self) -> &Self::RevealedT {
+        self.as_slice()
+    }
+}
 
 impl __internal::Sealed for Box<[u8]> {}
-impl ValidSecretT for Box<[u8]> {}
+impl ValidSecretT for Box<[u8]> {
+    type RevealedT = [u8];
+
+    fn reveal(&self) -> &Self::RevealedT {
+        self
+    }
+}
 
 impl __internal::Sealed for Box<str> {}
-impl ValidSecretT for Box<str> {}
+impl ValidSecretT for Box<str> {
+    type RevealedT = str;
+
+    fn reveal(&self) -> &Self::RevealedT {
+        self
+    }
+}
 
 impl<const N: usize> __internal::Sealed for [u8; N] {}
-impl<const N: usize> ValidSecretT for [u8; N] {}
+impl<const N: usize> ValidSecretT for [u8; N] {
+    type RevealedT = [u8];
+
+    fn reveal(&self) -> &Self::RevealedT {
+        &self[..]
+    }
+}
 
 /// Holds a secret value and helps prevent it from being accidentally exposed
 pub struct Secret<T: ValidSecretT> {
@@ -45,8 +79,8 @@ impl<T: ValidSecretT> Secret<T> {
     }
 
     /// Reveals the secret value. Use responsibly.
-    pub fn reveal_value(&self) -> &T {
-        &self.value
+    pub fn reveal_value(&self) -> &T::RevealedT {
+        self.value.reveal()
     }
 }
 
@@ -80,7 +114,7 @@ impl<T: ValidSecretT + AsRef<[u8]>> Secret<T> {
         if self.value.as_ref().is_empty() {
             return false;
         }
-        
+
         self.value.as_ref().ct_eq(other).into()
     }
 }
